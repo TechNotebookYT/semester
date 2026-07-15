@@ -67,7 +67,3 @@ One file per course. Items with unknown dates land in **Needs a Date**; the grad
 ## Data
 
 Everything is stored locally in the app's web storage (`localStorage`, key `semester-app-v1`) — no accounts, no network. Notifications, the `.ics` save dialog, and trackpad haptics are the only native integrations.
-
-## For coding agents
-
-Read [`handoff.md`](handoff.md) first — it's a condensed map of the architecture, data model, and conventions, written so you can start working without indexing the codebase.
