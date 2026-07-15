@@ -1,6 +1,6 @@
 # Semester
 
-A macOS desktop app for tracking a college semester (assignments, exams, personal to-dos, and grades) with an Apple "liquid glass" design. Built with Tauri 2 and vanilla JavaScript (no framework, no bundler).
+A macOS desktop app for tracking a college semester (assignments, exams, personal to-dos, and grades) with an Apple "liquid glass" design. Built with Tauri 2 and JavaScript.
 
 ![Platform](https://img.shields.io/badge/platform-macOS-black) ![Tauri](https://img.shields.io/badge/Tauri-2-blue)
 
