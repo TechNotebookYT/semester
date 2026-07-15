@@ -36,10 +36,10 @@ Dropping in a syllabus and reviewing what was parsed before it's added:
 ## Features
 
 - **Calendar.** Month, Week, and Agenda views with direct-manipulation trackpad scrolling: the calendar follows your fingers 1:1 and snaps to the nearest month/week, with Force Touch haptic ticks at each boundary.
-- **Syllabus import.** Copy the built-in prompt into Claude (or any LLM) along with a course syllabus; it returns a JSON file you drop into the app. Assignments, recurring items, TBD dates, and the grading breakdown all import in one shot, with a review step before anything is added.
+- **Syllabus import.** Copy the built-in prompt into any LLM along with a course syllabus; it returns a JSON file you drop into the app. Assignments, recurring items, TBD dates, and the grading breakdown all import in one shot, with a review step before anything is added.
 - **Grade calculator.** Per-course weighted categories (auto-filled from the imported syllabus); enter scores as they come to see your current grade and letter.
 - **To-Dos.** Personal tasks alongside coursework, shown in pink on the calendar, with their own page (Overdue / Today / Upcoming) and the top two pinned in the sidebar.
-- **Satisfying check-off.** A choreographed completion animation: the checkbox flares in the course color, the title strikes through, and the card morphs into a "done" pill.
+- **Animations** Fluid animations throughout the app. Checking off items, transitioning between pages, etc.
 - **Due-soon notifications.** Anything unchecked and due within 3 hours triggers a macOS notification (while the app is open).
 - **Course editor.** Rename, recolor, or bulk-edit any course's raw JSON; two-step delete.
 - **Extras.** "Needs a Date" inbox for TBD items, Completed history, `.ics` export to Apple Calendar, light/dark liquid-glass themes, and everything stored locally.
@@ -59,7 +59,7 @@ Frontend lives in `src/` (plain HTML/CSS/JS, served as static files); the Rust s
 ## Importing a course
 
 1. Open the **Import** view (⇩ in the title bar) and copy the prompt.
-2. Paste it into Claude/ChatGPT together with your syllabus; save the JSON reply as a `.json` file.
+2. Paste it into Claude/ChatGPT/Gemini together with your syllabus; save the JSON reply as a `.json` file.
 3. Drop the file into the app, review the parsed assignments, and add them to your calendar.
 
 One file per course. Items with unknown dates land in **Needs a Date**; the grading breakdown lands in the **Grade Calculator**.
