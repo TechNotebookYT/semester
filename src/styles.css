@@ -709,6 +709,9 @@ textarea.field { resize: vertical; min-height: 64px; line-height: 1.45; }
   user-select: text;
 }
 .detail-actions { display: flex; gap: 10px; }
+/* recurring items get a second row: delete just this date vs the whole series */
+.detail-del-row { margin-top: 10px; }
+.detail-del-row .btn-delete { flex: 1; text-align: center; }
 .btn-done { flex: 1; height: 40px; border-radius: 11px; border: none; cursor: pointer; font-size: 14px; font-weight: 600; color: #fff; background: #34c759; }
 .btn-done.undone { background: #8e8e93; }
 .btn-ics, .btn-delete {

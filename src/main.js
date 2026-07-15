@@ -179,16 +179,19 @@ function occurrences() {
       let cur = new Date(start), i = 0;
       while (cur <= until && i < 120) {
         const ds = fmt(cur);
-        out.push(Object.assign({}, a, {
-          dueDate: ds,
-          _recurring: true,
-          _baseId: a.id,
-          id: a.id + '@' + ds,
-          // recurring occurrences are completed per-date, not on the base item
-          status: a.doneDates && a.doneDates[ds] ? 'done' : 'todo',
-          // surface the per-date completion timestamp (older data may be `true`)
-          doneAt: a.doneDates && typeof a.doneDates[ds] === 'string' ? a.doneDates[ds] : undefined,
-        }));
+        // a single occurrence deleted from the series is recorded in exDates
+        if (!(a.exDates && a.exDates[ds])) {
+          out.push(Object.assign({}, a, {
+            dueDate: ds,
+            _recurring: true,
+            _baseId: a.id,
+            id: a.id + '@' + ds,
+            // recurring occurrences are completed per-date, not on the base item
+            status: a.doneDates && a.doneDates[ds] ? 'done' : 'todo',
+            // surface the per-date completion timestamp (older data may be `true`)
+            doneAt: a.doneDates && typeof a.doneDates[ds] === 'string' ? a.doneDates[ds] : undefined,
+          }));
+        }
         if (freq === 'daily') cur.setDate(cur.getDate() + step);
         else if (freq === 'monthly') cur.setMonth(cur.getMonth() + step);
         else cur.setDate(cur.getDate() + 7 * step);
@@ -428,7 +431,11 @@ function renderSidebar() {
   const todayStr = fmt(TODAY);
   const in7 = new Date(TODAY); in7.setDate(TODAY.getDate() + 7);
   const in7Str = fmt(in7);
-  const overdue = occ.filter((o) => o.dueDate < todayStr && o.status !== 'done');
+  // overdue = past-due and unchecked, but ignore anything 3+ weeks stale — that's
+  // almost always something finished-but-never-checked-off, not a real to-do
+  const wk3 = new Date(TODAY); wk3.setDate(TODAY.getDate() - 21);
+  const wk3Str = fmt(wk3);
+  const overdue = occ.filter((o) => o.dueDate < todayStr && o.dueDate >= wk3Str && o.status !== 'done');
   const upcoming = occ.filter((o) => o.dueDate >= todayStr && o.status !== 'done');
   const dueToday = upcoming.filter((o) => o.dueDate === todayStr);
   const dueWeek = upcoming.filter((o) => o.dueDate <= in7Str);
@@ -1480,8 +1487,13 @@ function detailModalHTML() {
         <div class="detail-actions">
           <button class="btn-done ${done ? 'undone' : ''}" data-act="detail-toggle-done" data-id="${found.id}" data-base="${found._baseId || found.id}">${done ? 'Mark as To-Do' : 'Mark Done'}</button>
           <button class="btn-ics" data-act="detail-export" title="Export to Apple Calendar">.ics</button>
-          <button class="btn-delete" data-act="detail-delete" data-base="${found._baseId || found.id}">Delete</button>
+          ${found._recurring ? '' : `<button class="btn-delete" data-act="detail-delete" data-base="${found._baseId || found.id}">Delete</button>`}
         </div>
+        ${found._recurring ? `
+        <div class="detail-actions detail-del-row">
+          <button class="btn-delete" data-act="detail-delete-occ" data-base="${found._baseId}" data-date="${found.dueDate}" title="Remove only this date">Delete this date</button>
+          <button class="btn-delete" data-act="detail-delete" data-base="${found._baseId}" title="Remove every occurrence">Delete series</button>
+        </div>` : ''}
       </div>
     </div>`;
 }
@@ -1933,6 +1945,18 @@ document.addEventListener('click', (e) => {
     case 'detail-delete': {
       const base = el.dataset.base;
       state.assignments = state.assignments.filter((a) => a.id !== base);
+      state.detailId = null;
+      render();
+      break;
+    }
+    case 'detail-delete-occ': {
+      // drop just this date from a recurring series (recorded in exDates)
+      const base = el.dataset.base, date = el.dataset.date;
+      state.assignments = state.assignments.map((a) => {
+        if (a.id !== base) return a;
+        const ex = Object.assign({}, a.exDates || {}, { [date]: true });
+        return Object.assign({}, a, { exDates: ex });
+      });
       state.detailId = null;
       render();
       break;
