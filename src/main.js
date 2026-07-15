@@ -186,6 +186,8 @@ function occurrences() {
           id: a.id + '@' + ds,
           // recurring occurrences are completed per-date, not on the base item
           status: a.doneDates && a.doneDates[ds] ? 'done' : 'todo',
+          // surface the per-date completion timestamp (older data may be `true`)
+          doneAt: a.doneDates && typeof a.doneDates[ds] === 'string' ? a.doneDates[ds] : undefined,
         }));
         if (freq === 'daily') cur.setDate(cur.getDate() + step);
         else if (freq === 'monthly') cur.setMonth(cur.getMonth() + step);
@@ -201,7 +203,7 @@ function occurrences() {
 
 // the completion celebration: checkbox flares and fills, the title gets
 // struck through stroke-by-stroke, the card's outline glows in the course
-// color, then the card folds away — and its "done" incarnation pops in
+// color, then the card morphs — shrinks and glides — into its "done" incarnation
 function playCompleteAnim(checkEl) {
   if (checkEl.classList.contains('checking')) return; // already mid-celebration
   const occId = checkEl.dataset.id;
@@ -210,6 +212,17 @@ function playCompleteAnim(checkEl) {
 
   checkEl.classList.add('checking');
   hapticTick('align');
+
+  // sidebar to-do rows have no on-screen "done" incarnation to morph into (they
+  // just leave the list), and the wide glow/scale looks wrong in the narrow
+  // panel — check, then collapse the row in place rather than fly a ghost across
+  // the app to wherever the done copy happens to render
+  if (card && checkEl.closest('#sidebar')) {
+    setTimeout(() => card.classList.add('row-collapse'), 340);
+    setTimeout(() => { toggleDone(occId, baseId); hapticTick('edge'); }, 660);
+    return;
+  }
+
   if (card) {
     card.classList.add('completing');
     const title = card.querySelector('.wcard-title, .acard-title, .todo-title');
@@ -217,27 +230,81 @@ function playCompleteAnim(checkEl) {
   }
 
   setTimeout(() => {
+    const from = card && card.getBoundingClientRect();
+    const ghost = card ? morphGhost(card, from) : null;
     completedPopId = occId;
-    toggleDone(occId, baseId); // re-renders; the new element pops via completedPopId
+    toggleDone(occId, baseId); // re-renders; morphToDone hands off to the new element
     completedPopId = null;
     hapticTick('edge'); // soft thud as it lands in the pill
-  }, card ? 900 : 350);
+    morphToDone(ghost, from, occId);
+  }, card ? 620 : 350);
+}
+
+// fixed-position clone of the card, frozen mid-celebration, used as the
+// morph's outgoing half (the live card is destroyed by the re-render)
+function morphGhost(card, r) {
+  const g = card.cloneNode(true);
+  g.classList.remove('completing');
+  // freeze cloned check/strike animations at their end state instead of replaying
+  for (const n of g.querySelectorAll('*')) { n.style.animationDuration = '0s'; n.style.transition = 'none'; }
+  g.style.cssText += `;position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;margin:0;z-index:60;pointer-events:none;transform-origin:top left;`;
+  document.body.appendChild(g);
+  return g;
+}
+
+// FLIP crossfade: the ghost of the big card shrinks/glides into the done
+// element's box while the done element grows out of the card's box
+function morphToDone(ghost, from, occId) {
+  if (!ghost) return;
+  const sel = `.done-chip[data-id="${occId}"], .acard[data-id="${occId}"], .todo-row[data-id="${occId}"], .wcard[data-id="${occId}"]`;
+  const target = document.querySelector(sel);
+  if (!target || !ghost.animate) {
+    // done incarnation isn't on screen (e.g. sidebar to-do) — just shrink away
+    if (ghost.animate) {
+      ghost.animate(
+        [{ transform: 'none', opacity: 1 }, { transform: 'scale(.6)', opacity: 0 }],
+        { duration: 280, easing: 'ease-in' }
+      ).onfinish = () => ghost.remove();
+    } else ghost.remove();
+    return;
+  }
+  target.classList.remove('pill-pop'); // the morph replaces the fallback pop
+  const to = target.getBoundingClientRect();
+  const ease = 'cubic-bezier(.3,1.15,.4,1)';
+  ghost.animate(
+    [
+      { transform: 'none', opacity: 1 },
+      { transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`, opacity: 0 },
+    ],
+    { duration: 440, easing: ease }
+  ).onfinish = () => ghost.remove();
+  target.animate(
+    [
+      { transformOrigin: 'top left', transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`, opacity: 0 },
+      { transformOrigin: 'top left', transform: 'none', opacity: 1 },
+    ],
+    { duration: 440, easing: ease }
+  );
 }
 
 function toggleDone(occId, baseId) {
   const base = baseId || occId;
+  const now = new Date().toISOString();
   if (occId && occId.includes('@')) {
-    // recurring occurrence: toggle just this date
+    // recurring occurrence: toggle just this date. The value doubles as the
+    // completion timestamp (any truthy value counts as done in occurrences()).
     const date = occId.split('@')[1];
     state.assignments = state.assignments.map((a) => {
       if (a.id !== base) return a;
       const dd = Object.assign({}, a.doneDates || {});
-      if (dd[date]) delete dd[date]; else dd[date] = true;
+      if (dd[date]) delete dd[date]; else dd[date] = now;
       return Object.assign({}, a, { doneDates: dd });
     });
   } else {
     state.assignments = state.assignments.map((a) =>
-      a.id === base ? Object.assign({}, a, { status: a.status === 'done' ? 'todo' : 'done' }) : a
+      a.id === base
+        ? Object.assign({}, a, a.status === 'done' ? { status: 'todo' } : { status: 'done', doneAt: now })
+        : a
     );
   }
   render();
@@ -359,12 +426,21 @@ function renderTitlebar() {
 function renderSidebar() {
   const occ = occurrences();
   const todayStr = fmt(TODAY);
-  const tomorrow = new Date(TODAY); tomorrow.setDate(TODAY.getDate() + 1);
   const in7 = new Date(TODAY); in7.setDate(TODAY.getDate() + 7);
+  const in7Str = fmt(in7);
+  const overdue = occ.filter((o) => o.dueDate < todayStr && o.status !== 'done');
   const upcoming = occ.filter((o) => o.dueDate >= todayStr && o.status !== 'done');
-  const dueTomorrow = upcoming.filter((o) => o.dueDate === fmt(tomorrow));
-  const dueWeek = upcoming.filter((o) => o.dueDate <= fmt(in7));
+  const dueToday = upcoming.filter((o) => o.dueDate === todayStr);
+  const dueWeek = upcoming.filter((o) => o.dueDate <= in7Str);
 
+  // the single soonest deadline — the "do this first" item
+  let next = null;
+  for (const o of upcoming) {
+    if (!next || o.dueDate < next.dueDate ||
+        (o.dueDate === next.dueDate && (o.dueTime || '99:99') < (next.dueTime || '99:99'))) next = o;
+  }
+
+  // the toughest thing still ahead — where study time should go
   let hardest = null;
   for (const o of upcoming) {
     if (!hardest || o.difficulty > hardest.difficulty ||
@@ -373,14 +449,46 @@ function renderSidebar() {
   const exams = upcoming.filter((o) => o.type === 'exam')
     .sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1)).slice(0, 3);
 
+  // next-7-days workload — one bar per day so crunch days stand out
+  const load = [];
+  let loadMax = 1;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(TODAY); d.setDate(TODAY.getDate() + i);
+    const n = upcoming.filter((o) => o.dueDate === fmt(d)).length;
+    loadMax = Math.max(loadMax, n);
+    load.push({ n, wd: 'SMTWTFS'[d.getDay()], today: i === 0 });
+  }
+
   const legendHTML = state.courses.length
-    ? state.courses.map((c) => `
-      <button class="legend-btn" data-act="legend-toggle" data-id="${c.id}" style="opacity:${state.hidden[c.id] ? 0.4 : 1}">
-        <span class="legend-swatch" style="background:${c.color}"></span>
-        <span class="legend-name">${esc(c.name)}</span>
-        <span class="legend-code">${esc(c.code)}</span>
-      </button>`).join('')
+    ? state.courses.map((c) => {
+      const on = !state.hidden[c.id];
+      return `
+      <div class="legend-row ${on ? '' : 'off'}">
+        <span class="legend-check ${on ? 'on' : ''}" data-act="legend-toggle" data-id="${c.id}"
+              style="--cc:${c.color}" role="checkbox" aria-checked="${on}"
+              title="${on ? 'Hide on calendar' : 'Show on calendar'}"></span>
+        <button class="legend-open" data-act="course-edit" data-id="${c.id}" title="Open ${esc(c.name)}">
+          <span class="legend-name">${esc(c.name)}</span>
+          <span class="legend-code">${esc(c.code)}</span>
+        </button>
+      </div>`;
+    }).join('')
     : `<div class="legend-empty">No courses yet — import a syllabus to get started.</div>`;
+
+  let nextHTML = `<div class="glance-none">Nothing upcoming — you're clear.</div>`;
+  if (next) {
+    const nc = course(next.courseId);
+    const diff = Math.round((parseDate(next.dueDate) - TODAY) / 86400000);
+    const urg = diff <= 1 ? '#ff453a' : diff <= 3 ? '#ff9f0a' : 'var(--text-dim)';
+    nextHTML = `
+      <div class="glance-card" data-act="detail" data-id="${next.id}" style="border-left:3px solid ${nc.color}">
+        <div class="gc-body">
+          <div class="gc-title">${esc(next.title)}</div>
+          <div class="gc-meta">${esc(nc.code)}${next.dueTime ? ' · ' + timeLabel(next.dueTime) : ''}</div>
+        </div>
+        <span class="gc-count" style="color:${urg}">${countdownLabel(next.dueDate)}</span>
+      </div>`;
+  }
 
   let hardestHTML = `<div class="glance-none">Nothing upcoming</div>`;
   if (hardest) {
@@ -394,6 +502,16 @@ function renderSidebar() {
         ${dotsHTML(hardest.difficulty, 6, 'tight')}
       </div>`;
   }
+
+  // 7-day workload sparkbars — empty days show a faint baseline nub
+  const barsHTML = load.map((d) => `
+    <div class="load-col ${d.today ? 'today' : ''}" title="${d.n} due">
+      <div class="load-track">
+        <div class="load-bar ${d.n ? '' : 'empty'}" style="height:${d.n ? Math.max(14, Math.round(d.n / loadMax * 100)) : 0}%"></div>
+      </div>
+      <div class="load-n">${d.n || ''}</div>
+      <div class="load-wd">${d.wd}</div>
+    </div>`).join('');
 
   let examsHTML = `<div class="glance-none">No exams on the horizon</div>`;
   if (exams.length) {
@@ -425,9 +543,6 @@ function renderSidebar() {
     <button class="nav-btn ${state.view === 'grades' ? 'active' : ''}" data-act="view" data-view="grades">
       <span class="nav-icon">％</span> Grade Calculator
     </button>
-    <button class="nav-btn ${state.view === 'courses' ? 'active' : ''}" data-act="view" data-view="courses">
-      <span class="nav-icon">▦</span> Courses
-    </button>
     <button class="nav-btn ${state.view === 'todos' ? 'active' : ''}" data-act="view" data-view="todos">
       <span class="nav-icon">☑</span> To-Dos
     </button>
@@ -437,7 +552,7 @@ function renderSidebar() {
 
     <div class="sb-head-row">
       <span class="sb-head">Courses</span>
-      <span class="sb-hint">tap to hide</span>
+      <span class="sb-hint">check to show · click to open</span>
     </div>
     ${legendHTML}
 
@@ -450,17 +565,29 @@ function renderSidebar() {
     <div class="glance">
       <div class="sb-head">At a Glance</div>
       <div class="stat-row">
+        <div class="stat-tile ${overdue.length ? 'alert' : ''}">
+          <div class="stat-num" style="color:${overdue.length ? '#ff453a' : 'var(--text-faint)'}">${overdue.length}</div>
+          <div class="stat-label">Overdue</div>
+        </div>
         <div class="stat-tile">
-          <div class="stat-num" style="color:${dueTomorrow.length ? '#ff9f0a' : 'var(--text)'}">${dueTomorrow.length}</div>
-          <div class="stat-label">Due tomorrow</div>
+          <div class="stat-num" style="color:${dueToday.length ? '#ff9f0a' : 'var(--text)'}">${dueToday.length}</div>
+          <div class="stat-label">Due today</div>
         </div>
         <div class="stat-tile">
           <div class="stat-num">${dueWeek.length}</div>
-          <div class="stat-label">Next 7 days</div>
+          <div class="stat-label">This week</div>
         </div>
       </div>
       <div class="glance-section">
-        <div class="glance-sub">Hardest ahead</div>
+        <div class="glance-sub">Workload · next 7 days</div>
+        <div class="load-chart">${barsHTML}</div>
+      </div>
+      <div class="glance-section">
+        <div class="glance-sub">Up next</div>
+        ${nextHTML}
+      </div>
+      <div class="glance-section">
+        <div class="glance-sub">Toughest ahead</div>
         ${hardestHTML}
       </div>
       <div class="glance-section">
@@ -531,6 +658,7 @@ function renderMain() {
   // animate view changes: calendar trio slides directionally, pages fade up
   const prev = renderMain._last;
   if (prev && prev !== state.view) {
+    main.scrollTop = 0; // a stale offset from the last visit makes the slide-in judder
     const el = main.firstElementChild;
     if (el) {
       let cls = 'va-fade';
@@ -538,6 +666,13 @@ function renderMain() {
         cls = VIEW_ORDER[state.view] > VIEW_ORDER[prev] ? 'va-left' : 'va-right';
       }
       el.classList.add(cls);
+      // drop the class when done so a leftover animation can't replay or
+      // keep agenda groups pinned out of content-visibility laziness
+      el.addEventListener('animationend', function h(e) {
+        if (e.target !== el) return; // ignore bubbled child animations
+        el.classList.remove(cls);
+        el.removeEventListener('animationend', h);
+      });
     }
   }
   renderMain._last = state.view;
@@ -864,10 +999,21 @@ function todosView() {
 
 // ---- completed page ----
 function doneView() {
+  // only the last two weeks: judged by completion time (doneAt); items from
+  // before we tracked that fall back to their due date as a proxy
+  const cutoff = new Date(TODAY); cutoff.setDate(TODAY.getDate() - 14);
+  const cutoffStr = fmt(cutoff);
+  const within2wk = (o) => {
+    const ref = (o.doneAt && o.doneAt.slice(0, 10)) || o.dueDate;
+    return ref && ref >= cutoffStr;
+  };
+
   const items = occurrences().filter((o) => o.status === 'done')
     .concat(state.assignments.filter((a) => !a.dueDate && a.status === 'done' && !state.hidden[a.courseId]))
+    .filter(within2wk)
     .sort((x, y) => {
-      const dx = x.dueDate || '0000', dy = y.dueDate || '0000';
+      const dx = (x.doneAt && x.doneAt.slice(0, 10)) || x.dueDate || '0000';
+      const dy = (y.doneAt && y.doneAt.slice(0, 10)) || y.dueDate || '0000';
       return dx < dy ? 1 : dx > dy ? -1 : (x.dueTime || '') < (y.dueTime || '') ? 1 : -1;
     });
 
@@ -894,8 +1040,8 @@ function doneView() {
         <h2 class="page-h2">Completed</h2>
         <span class="course-count">${items.length} done</span>
       </div>
-      <p class="page-sub">Everything you've checked off, newest first. Uncheck anything to send it back.</p>
-      ${items.length ? `<div class="done-list">${rows}</div>` : `<div class="needs-empty">Nothing completed yet — go check something off.</div>`}
+      <p class="page-sub">Checked off in the last two weeks, newest first. Uncheck anything to send it back.</p>
+      ${items.length ? `<div class="done-list">${rows}</div>` : `<div class="needs-empty">Nothing completed in the last two weeks.</div>`}
     </div>`;
 }
 
@@ -1622,6 +1768,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'course-edit': {
+      state.view = 'courses'; // reachable straight from the sidebar course list now
       state.courseEdit = el.dataset.id;
       state.courseJson = buildCourseJson(el.dataset.id);
       state.courseJsonError = '';

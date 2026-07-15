@@ -4,6 +4,35 @@ A macOS desktop app for tracking a college semester — assignments, exams, pers
 
 ![Platform](https://img.shields.io/badge/platform-macOS-black) ![Tauri](https://img.shields.io/badge/Tauri-2-blue)
 
+<p align="center">
+  <img src="assets/img/dark_mode_month.png" alt="Semester — month view in dark mode" width="820">
+</p>
+
+## Screenshots
+
+The full month and week calendars, in both themes:
+
+<table>
+  <tr>
+    <th align="center">Light</th>
+    <th align="center">Dark</th>
+  </tr>
+  <tr>
+    <td><img src="assets/img/light_mode_month.png" alt="Month view (light)" width="410"></td>
+    <td><img src="assets/img/dark_mode_month.png" alt="Month view (dark)" width="410"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/img/light_mode_week.png" alt="Week view (light)" width="410"></td>
+    <td><img src="assets/img/dark_mode_week.png" alt="Week view (dark)" width="410"></td>
+  </tr>
+</table>
+
+Dropping in a syllabus and reviewing what was parsed before it's added:
+
+<p align="center">
+  <img src="assets/img/import_view.png" alt="Syllabus import and review screen" width="740">
+</p>
+
 ## Features
 
 - **Calendar** — Month, Week, and Agenda views with direct-manipulation trackpad scrolling: the calendar follows your fingers 1:1 and snaps to the nearest month/week, with Force Touch haptic ticks at each boundary.
