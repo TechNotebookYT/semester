@@ -30,7 +30,15 @@ let state = {
   courses: [],
   assignments: [],
   notified: {},
+  courseEdit: null,
+  courseJson: '',
+  courseJsonError: '',
+  courseJsonSaved: false,
+  confirmDeleteCourse: false,
 };
+
+// occurrence id that just got completed — its reborn element pops in on the next render
+let completedPopId = null;
 
 function loadState() {
   try {
@@ -191,6 +199,31 @@ function occurrences() {
   return out.filter((o) => !state.hidden[o.courseId]);
 }
 
+// the completion celebration: checkbox flares and fills, the title gets
+// struck through stroke-by-stroke, the card's outline glows in the course
+// color, then the card folds away — and its "done" incarnation pops in
+function playCompleteAnim(checkEl) {
+  if (checkEl.classList.contains('checking')) return; // already mid-celebration
+  const occId = checkEl.dataset.id;
+  const baseId = checkEl.dataset.base;
+  const card = checkEl.closest('.wcard, .acard, .todo-row');
+
+  checkEl.classList.add('checking');
+  hapticTick('align');
+  if (card) {
+    card.classList.add('completing');
+    const title = card.querySelector('.wcard-title, .acard-title, .todo-title');
+    if (title) setTimeout(() => title.classList.add('strike-anim'), 120);
+  }
+
+  setTimeout(() => {
+    completedPopId = occId;
+    toggleDone(occId, baseId); // re-renders; the new element pops via completedPopId
+    completedPopId = null;
+    hapticTick('edge'); // soft thud as it lands in the pill
+  }, card ? 900 : 350);
+}
+
 function toggleDone(occId, baseId) {
   const base = baseId || occId;
   if (occId && occId.includes('@')) {
@@ -310,6 +343,7 @@ function renderTitlebar() {
   else if (state.view === 'courses') title = 'Courses';
   else if (state.view === 'grades') title = 'Grades';
   else if (state.view === 'todos') title = 'To-Dos';
+  else if (state.view === 'done') title = 'Completed';
   $('#header-title').textContent = title;
 
   $('#btn-import').classList.toggle('active', state.view === 'import');
@@ -397,6 +431,9 @@ function renderSidebar() {
     <button class="nav-btn ${state.view === 'todos' ? 'active' : ''}" data-act="view" data-view="todos">
       <span class="nav-icon">☑</span> To-Dos
     </button>
+    <button class="nav-btn ${state.view === 'done' ? 'active' : ''}" data-act="view" data-view="done">
+      <span class="nav-icon">✓</span> Completed
+    </button>
 
     <div class="sb-head-row">
       <span class="sb-head">Courses</span>
@@ -454,8 +491,8 @@ function todoMeta(a) {
 
 function todoRowHTML(a) {
   return `
-    <div class="todo-row" data-act="detail" data-id="${a.id}">
-      <span class="check todo-check" data-act="toggle-done" data-id="${a.id}" data-base="${a._baseId || a.id}"></span>
+    <div class="todo-row" data-act="detail" data-id="${a.id}" style="--cc:${TODO_COURSE.color}">
+      <span class="check todo-check" data-act="toggle-done" data-done="0" data-id="${a.id}" data-base="${a._baseId || a.id}"></span>
       <div class="todo-body">
         <div class="todo-title">${esc(a.title)}</div>
         <div class="todo-meta ${a.dueDate && a.dueDate < fmt(TODAY) ? 'late' : ''}">${todoMeta(a)}</div>
@@ -489,6 +526,7 @@ function renderMain() {
     case 'grades': main.innerHTML = gradesView(); break;
     case 'import': main.innerHTML = importView(); break;
     case 'todos': main.innerHTML = todosView(); break;
+    case 'done': main.innerHTML = doneView(); break;
   }
   // animate view changes: calendar trio slides directionally, pages fade up
   const prev = renderMain._last;
@@ -614,8 +652,8 @@ function weekRowsHTML(wkStart, byDate) {
         ${active.map((o) => {
           const c = course(o.courseId);
           return `
-            <div class="wcard" data-act="detail" data-id="${o.id}" style="border-left-color:${c.color}">
-              <span class="check" data-act="toggle-done" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
+            <div class="wcard" data-act="detail" data-id="${o.id}" style="--cc:${c.color};border-left-color:${c.color}">
+              <span class="check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
               <div class="body-col">
                 <div class="wcard-title">${esc(o.title)}</div>
                 <div class="wcard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
@@ -630,8 +668,8 @@ function weekRowsHTML(wkStart, byDate) {
         ${done.map((o) => {
           const c = course(o.courseId);
           return `
-            <div class="done-chip" data-act="detail" data-id="${o.id}" title="${esc(o.title)}">
-              <span class="done-chip-check" data-act="toggle-done" data-id="${o.id}" data-base="${o._baseId || o.id}" style="background:${c.color}">✓</span>
+            <div class="done-chip ${o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" title="${esc(o.title)}">
+              <span class="done-chip-check" data-act="toggle-done" data-done="1" data-id="${o.id}" data-base="${o._baseId || o.id}" style="background:${c.color}">✓</span>
               <span class="done-chip-title">${esc(o.title)}</span>
             </div>`;
         }).join('')}
@@ -676,8 +714,8 @@ function agendaView() {
       const c = course(o.courseId);
       const done = o.status === 'done';
       return `
-        <div class="acard" data-act="detail" data-id="${o.id}">
-          <span class="check" data-act="toggle-done" data-id="${o.id}" data-base="${o._baseId || o.id}"
+        <div class="acard ${done && o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" style="--cc:${c.color}">
+          <span class="check" data-act="toggle-done" data-done="${done ? 1 : 0}" data-id="${o.id}" data-base="${o._baseId || o.id}"
                 style="${done ? `background:${c.color};border-color:${c.color}` : ''}">${done ? '✓' : ''}</span>
           <span class="acard-swatch" style="background:${c.color}"></span>
           <div class="body-col">
@@ -735,14 +773,20 @@ function needsView() {
 
 // ---- courses ----
 function coursesView() {
+  if (state.courseEdit) {
+    const c = state.courses.find((x) => x.id === state.courseEdit);
+    if (c) return courseEditorHTML(c);
+    state.courseEdit = null;
+  }
   const list = state.courses.length ? state.courses.map((c) => `
-    <div class="course-card">
+    <div class="course-card clickable" data-act="course-edit" data-id="${c.id}">
       <span class="course-swatch" style="background:${c.color}"></span>
       <div style="flex:1;">
         <div class="course-name">${esc(c.name)}</div>
         <div class="course-code">${esc(c.code)}</div>
       </div>
       <span class="course-count">${state.assignments.filter((a) => a.courseId === c.id).length} items</span>
+      <span class="course-chevron">›</span>
     </div>`).join('')
     : `<div class="needs-empty">No courses yet. Import a syllabus to add your first class.</div>`;
 
@@ -757,7 +801,7 @@ function coursesView() {
   return `
     <div class="page-wrap">
       <h2 class="page-h2">Courses</h2>
-      <p class="page-sub">Your color legend. Import more syllabi to add classes.</p>
+      <p class="page-sub">Click a course to edit its name, color, and data. Import more syllabi to add classes.</p>
       <div class="card-list">${list}</div>
       <div class="diff-scale">
         <div class="diff-scale-title">Difficulty scale</div>
@@ -770,8 +814,8 @@ function coursesView() {
 function todoCardHTML(o) {
   const done = o.status === 'done';
   return `
-    <div class="acard" data-act="detail" data-id="${o.id}">
-      <span class="check" data-act="toggle-done" data-id="${o.id}" data-base="${o._baseId || o.id}"
+    <div class="acard ${done && o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" style="--cc:${TODO_COURSE.color}">
+      <span class="check" data-act="toggle-done" data-done="${done ? 1 : 0}" data-id="${o.id}" data-base="${o._baseId || o.id}"
             style="${done ? `background:${TODO_COURSE.color};border-color:${TODO_COURSE.color}` : `border-color:${TODO_COURSE.color}`}">${done ? '✓' : ''}</span>
       <div class="body-col">
         <div class="acard-title ${done ? 'done' : ''}">${esc(o.title)}</div>
@@ -816,6 +860,179 @@ function todosView() {
       ${section('No date', '', dateless)}
       ${section('Completed', 'done', doneList)}
     </div>`;
+}
+
+// ---- completed page ----
+function doneView() {
+  const items = occurrences().filter((o) => o.status === 'done')
+    .concat(state.assignments.filter((a) => !a.dueDate && a.status === 'done' && !state.hidden[a.courseId]))
+    .sort((x, y) => {
+      const dx = x.dueDate || '0000', dy = y.dueDate || '0000';
+      return dx < dy ? 1 : dx > dy ? -1 : (x.dueTime || '') < (y.dueTime || '') ? 1 : -1;
+    });
+
+  const rows = items.slice(0, 300).map((o) => {
+    const c = course(o.courseId);
+    let meta = 'No date';
+    if (o.dueDate) {
+      const dt = parseDate(o.dueDate);
+      meta = monthName(dt.getMonth()).slice(0, 3) + ' ' + dt.getDate() + (o.dueTime ? ' · ' + timeLabel(o.dueTime) : '');
+    }
+    return `
+      <div class="done-row" data-act="detail" data-id="${o.id}">
+        <span class="check done-row-check" data-act="toggle-done" data-done="1" data-id="${o.id}" data-base="${o._baseId || o.id}"
+              style="background:${c.color};border-color:${c.color}">✓</span>
+        <span class="done-row-title">${esc(o.title)}</span>
+        <span class="done-row-code">${esc(c.code || (o.courseId === 'todo' ? 'To-Do' : ''))}</span>
+        <span class="done-row-meta">${meta}</span>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="page-wrap">
+      <div class="grades-head">
+        <h2 class="page-h2">Completed</h2>
+        <span class="course-count">${items.length} done</span>
+      </div>
+      <p class="page-sub">Everything you've checked off, newest first. Uncheck anything to send it back.</p>
+      ${items.length ? `<div class="done-list">${rows}</div>` : `<div class="needs-empty">Nothing completed yet — go check something off.</div>`}
+    </div>`;
+}
+
+// ---- course editor ----
+const COURSE_PALETTE = ['#e5484d', '#ff9f0a', '#ffcc00', '#34c759', '#30d158', '#64d2ff', '#0a84ff', '#5e5ce6', '#bf5af2', '#ff6482', '#a2845e', '#8e8e93'];
+
+function courseEditorHTML(c) {
+  const count = state.assignments.filter((a) => a.courseId === c.id).length;
+  const swatches = COURSE_PALETTE.map((col) => `
+    <button class="swatch ${String(c.color).toLowerCase() === col.toLowerCase() ? 'on' : ''}"
+            data-act="course-color" data-color="${col}" style="background:${col}" title="${col}"></button>`).join('');
+
+  return `
+    <div class="page-wrap">
+      <button class="btn-back" data-act="course-back">‹ Courses</button>
+
+      <div class="grades-head" style="margin-top:12px;">
+        <h2 class="page-h2" style="display:flex;align-items:center;gap:12px;margin:0;">
+          <span class="course-swatch" style="background:${c.color}"></span> ${esc(c.name)}
+        </h2>
+        <span class="course-count">${count} items</span>
+      </div>
+      <p class="page-sub">Changes apply everywhere — calendar, sidebar, grades.</p>
+
+      <div class="course-form">
+        <div class="frow">
+          <div class="grow">
+            <label class="field-label">Name</label>
+            <input class="field" value="${esc(c.name)}" data-input="course-name">
+          </div>
+          <div class="w130">
+            <label class="field-label">Code</label>
+            <input class="field" value="${esc(c.code)}" data-input="course-code">
+          </div>
+        </div>
+        <label class="field-label">Color</label>
+        <div class="swatch-row">
+          ${swatches}
+          <label class="swatch custom" title="Custom color" style="background:${c.color}">
+            <span class="swatch-plus">✎</span>
+            <input type="color" value="${esc(c.color)}" data-input="course-color-custom">
+          </label>
+        </div>
+      </div>
+
+      <div class="json-box">
+        <div class="prompt-head">
+          <span class="prompt-file">course.json</span>
+          <span style="display:flex;gap:8px;">
+            <button class="btn-secondary sm" data-act="course-json-revert">Revert</button>
+            <button class="btn-confirm sm ${state.courseJsonSaved ? 'saved' : ''}" data-act="course-json-save">${state.courseJsonSaved ? 'Applied ✓' : 'Apply JSON'}</button>
+          </span>
+        </div>
+        <textarea class="json-edit" data-input="course-json" spellcheck="false">${esc(state.courseJson)}</textarea>
+        ${state.courseJsonError ? `<div class="import-error" style="margin:0 12px 12px;">${esc(state.courseJsonError)}</div>` : ''}
+      </div>
+
+      <button class="btn-delete-course ${state.confirmDeleteCourse ? 'confirm' : ''}" data-act="course-delete">
+        ${state.confirmDeleteCourse ? `Really delete “${esc(c.name)}” and its ${count} items? Click again.` : 'Delete Course…'}
+      </button>
+    </div>`;
+}
+
+// full round-trip JSON for one course: identity, grade categories, assignments
+function buildCourseJson(cid) {
+  const c = course(cid);
+  return JSON.stringify({
+    course: { name: c.name, code: c.code, color: c.color },
+    grades: (state.grades[cid] || []).map((g) => ({ name: g.name, weight: g.weight, score: g.score })),
+    assignments: state.assignments.filter((a) => a.courseId === cid).map((a) => {
+      const o = {
+        title: a.title, dueDate: a.dueDate, dueTime: a.dueTime,
+        type: a.type, difficulty: a.difficulty, status: a.status, notes: a.notes,
+      };
+      if (a.recurrence) o.recurrence = a.recurrence;
+      if (a.doneDates) o.doneDates = a.doneDates;
+      return o;
+    }),
+  }, null, 2);
+}
+
+function applyCourseJson() {
+  const cid = state.courseEdit;
+  let j;
+  try {
+    j = JSON.parse(state.courseJson);
+  } catch (e) {
+    state.courseJsonError = 'Invalid JSON — ' + e.message;
+    render();
+    return;
+  }
+  if (!j || typeof j !== 'object' || !j.course || !Array.isArray(j.assignments)) {
+    state.courseJsonError = 'Expected an object with "course" and an "assignments" array.';
+    render();
+    return;
+  }
+  state.courses = state.courses.map((c) => c.id === cid ? Object.assign({}, c, {
+    name: j.course.name || c.name,
+    code: j.course.code !== undefined ? j.course.code : c.code,
+    color: /^#[0-9a-fA-F]{3,8}$/.test(j.course.color || '') ? j.course.color : c.color,
+  }) : c);
+  if (Array.isArray(j.grades)) {
+    state.grades = Object.assign({}, state.grades, {
+      [cid]: j.grades.map((g, i) => ({
+        id: 'g' + Date.now() + '_' + i,
+        name: g.name || 'Category',
+        weight: parseFloat(g.weight) || 0,
+        score: (g.score === 0 || g.score) ? g.score : '',
+      })),
+    });
+  }
+  const rebuilt = j.assignments.map((a, i) => {
+    const out = {
+      id: 'j' + Date.now() + '_' + i,
+      title: String(a.title || 'Untitled'),
+      courseId: cid,
+      type: TYPES.includes(a.type) ? a.type : 'homework',
+      dueDate: a.dueDate || null,
+      dueTime: a.dueTime || undefined,
+      difficulty: Math.min(5, Math.max(1, parseInt(a.difficulty) || 1)),
+      status: a.status === 'done' ? 'done' : 'todo',
+      source: 'syllabus',
+      notes: a.notes || '',
+    };
+    if (a.recurrence) out.recurrence = a.recurrence;
+    if (a.doneDates) out.doneDates = a.doneDates;
+    return out;
+  });
+  state.assignments = state.assignments.filter((a) => a.courseId !== cid).concat(rebuilt);
+  state.courseJsonError = '';
+  state.courseJson = buildCourseJson(cid);
+  state.courseJsonSaved = true;
+  render();
+  setTimeout(() => {
+    state.courseJsonSaved = false;
+    if (state.view === 'courses' && state.courseEdit === cid) render();
+  }, 1600);
 }
 
 // ---- grades ----
@@ -1374,7 +1591,11 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'toggle-done': {
-      toggleDone(el.dataset.id, el.dataset.base);
+      if (el.dataset.done === '1') {
+        toggleDone(el.dataset.id, el.dataset.base); // unchecking is instant
+      } else {
+        playCompleteAnim(el);
+      }
       break;
     }
     case 'legend-toggle': {
@@ -1397,6 +1618,52 @@ document.addEventListener('click', (e) => {
       state.grades = Object.assign({}, state.grades, {
         [cid]: (state.grades[cid] || []).filter((c) => c.id !== el.dataset.id),
       });
+      render();
+      break;
+    }
+    case 'course-edit': {
+      state.courseEdit = el.dataset.id;
+      state.courseJson = buildCourseJson(el.dataset.id);
+      state.courseJsonError = '';
+      state.courseJsonSaved = false;
+      state.confirmDeleteCourse = false;
+      render();
+      break;
+    }
+    case 'course-back': {
+      state.courseEdit = null;
+      state.courseJsonError = '';
+      state.confirmDeleteCourse = false;
+      render();
+      break;
+    }
+    case 'course-color': {
+      const cid = state.courseEdit;
+      state.courses = state.courses.map((c) => c.id === cid ? Object.assign({}, c, { color: el.dataset.color }) : c);
+      state.courseJson = buildCourseJson(cid);
+      render();
+      break;
+    }
+    case 'course-json-save': applyCourseJson(); break;
+    case 'course-json-revert': {
+      state.courseJson = buildCourseJson(state.courseEdit);
+      state.courseJsonError = '';
+      render();
+      break;
+    }
+    case 'course-delete': {
+      if (!state.confirmDeleteCourse) {
+        state.confirmDeleteCourse = true;
+        render();
+        break;
+      }
+      const cid = state.courseEdit;
+      state.courses = state.courses.filter((c) => c.id !== cid);
+      state.assignments = state.assignments.filter((a) => a.courseId !== cid);
+      const g = Object.assign({}, state.grades); delete g[cid]; state.grades = g;
+      const h = Object.assign({}, state.hidden); delete h[cid]; state.hidden = h;
+      state.courseEdit = null;
+      state.confirmDeleteCourse = false;
       render();
       break;
     }
@@ -1538,6 +1805,16 @@ document.addEventListener('input', (e) => {
   switch (el.dataset.input) {
     case 'new-title': formTarget().title = el.value; break;
     case 'new-notes': formTarget().notes = el.value; break;
+    case 'course-name':
+    case 'course-code': {
+      const field = el.dataset.input === 'course-name' ? 'name' : 'code';
+      state.courses = state.courses.map((c) =>
+        c.id === state.courseEdit ? Object.assign({}, c, { [field]: el.value }) : c);
+      state.courseJson = buildCourseJson(state.courseEdit);
+      saveState(); // no re-render: keep typing focus; other views refresh on next render
+      break;
+    }
+    case 'course-json': state.courseJson = el.value; break;
     case 'grade-name': updateCat(gradeCourseId(), el.dataset.id, 'name', el.value); saveState(); break;
     case 'grade-weight':
     case 'grade-score': {
@@ -1563,6 +1840,13 @@ document.addEventListener('change', (e) => {
     case 'new-until': formTarget().until = el.value; break;
     case 'grade-course': {
       state.gradeCourse = el.value;
+      render();
+      break;
+    }
+    case 'course-color-custom': {
+      const cid = state.courseEdit;
+      state.courses = state.courses.map((c) => c.id === cid ? Object.assign({}, c, { color: el.value }) : c);
+      state.courseJson = buildCourseJson(cid);
       render();
       break;
     }
