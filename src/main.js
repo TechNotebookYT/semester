@@ -19,7 +19,6 @@ let state = {
   view: 'month',
   year: TODAY.getFullYear(),
   month: TODAY.getMonth(),
-  weekOffset: 0,
   hidden: {},
   editA: null,
   copied: false,
@@ -520,41 +519,38 @@ function toggleDone(occId, baseId) {
   playSbFlip(sbFlip);
 }
 
-// ---------- calendar carousel (direct-manipulation scroll + snap) ----------
+// ---------- month carousel (direct-manipulation scroll + snap) ----------
+// (week is a free-scrolling day list — only month snaps)
 function trackEl() {
-  return state.view === 'week' ? $('.week-track') : $('.month-track');
+  return $('.month-track');
 }
 function trackAxis() {
-  return state.view === 'week' ? 'X' : 'Y';
+  return 'Y';
 }
-// distance between adjacent panels: week = stage width minus peeks, month = stage height
 function panelDistance() {
-  if (state.view === 'week') {
-    const st = $('.week-stage');
-    return st ? st.clientWidth - 104 : 0;
-  }
   const st = $('.month-stage');
   return st ? st.clientHeight : 0;
 }
 
-// advance the calendar and re-render just the calendar surfaces —
+// advance the month and re-render just the calendar surfaces —
 // sidebar/modals don't depend on the visible month, and skipping them
 // keeps mid-gesture commits cheap
 function navCommit(dir) {
-  if (state.view === 'week') {
-    state.weekOffset += dir;
-  } else {
-    state.month += dir;
-    if (state.month < 0) { state.month = 11; state.year--; }
-    if (state.month > 11) { state.month = 0; state.year++; }
-  }
+  state.month += dir;
+  if (state.month < 0) { state.month = 11; state.year--; }
+  if (state.month > 11) { state.month = 0; state.year++; }
   hapticTick('strong');
   renderTitlebar();
   renderMain();
 }
 
-// button navigation: commit, then glide the new track in from the side
+// button navigation: month commits + glides; week scrolls the day list ±7 days
 function navCalendar(dir) {
+  if (state.view === 'week') {
+    scrollWeek(dir * 7);
+    hapticTick('align');
+    return;
+  }
   navCommit(dir);
   animateNav(dir);
 }
@@ -627,9 +623,14 @@ function renderTitlebar() {
   }
   $('#monthnav').hidden = !(state.view === 'month' || state.view === 'week');
 
-  const wkStart = weekStart();
   let title = monthName(state.month) + ' ' + state.year;
-  if (state.view === 'week') title = 'Week of ' + monthName(wkStart.getMonth()).slice(0, 3) + ' ' + wkStart.getDate();
+  if (state.view === 'week') {
+    // follows the day at the top of the rolling list (a scroll listener
+    // keeps this fresh between renders)
+    const top = topWeekRow();
+    const dt = top ? parseDate(top.dataset.date) : TODAY;
+    title = monthName(dt.getMonth()) + ' ' + dt.getFullYear();
+  }
   else if (state.view === 'agenda') title = 'Agenda';
   else if (state.view === 'import') title = 'Import';
   else if (state.view === 'needs') title = 'Needs a Date';
@@ -887,6 +888,8 @@ const VIEW_ORDER = { month: 0, week: 1, agenda: 2 };
 
 function renderMain() {
   const main = $('#main');
+  const sameView = renderMain._last === state.view;
+  const keepScroll = sameView ? main.scrollTop : 0;
   switch (state.view) {
     case 'month': main.innerHTML = monthView(); break;
     case 'week': main.innerHTML = weekView(); break;
@@ -898,6 +901,10 @@ function renderMain() {
     case 'todos': main.innerHTML = todosView(); break;
     case 'done': main.innerHTML = doneView(); break;
   }
+  // same view re-rendered (check-off, edit): the innerHTML swap must not
+  // jump the page — restore the scroll offset it had
+  if (sameView) main.scrollTop = keepScroll;
+
   // animate view changes: calendar trio slides directionally, pages fade up
   const prev = renderMain._last;
   if (prev && prev !== state.view) {
@@ -918,6 +925,8 @@ function renderMain() {
       });
     }
   }
+  // entering week: land with yesterday at the top (prev day + today + 6 ahead)
+  if (state.view === 'week' && !sameView) positionWeek(false);
   renderMain._last = state.view;
 }
 
@@ -993,89 +1002,144 @@ function monthGridHTML(year, month, byDate) {
   return `<div class="month-grid" style="grid-template-rows:repeat(${weekCount},1fr)">${rows}</div>`;
 }
 
-function weekStart() {
-  const d = new Date(TODAY);
-  d.setDate(TODAY.getDate() - TODAY.getDay() + state.weekOffset * 7);
-  return d;
-}
+// ---- week (rolling day list) ----
+// yesterday + today + the next 6 days fill the screen; the list extends
+// WEEK_PAST/WEEK_FUTURE days in each direction and scrolls freely — no snap
+const WEEK_PAST = 21, WEEK_FUTURE = 60;
 
-// ---- week ----
+// "home" = freshly landed on the yesterday→today+6 window (view entry or the
+// Today button). Only then is the outside-the-window gray applied; the first
+// finger scroll lifts it everywhere.
+let weekHomed = true;
+
 function weekView() {
   const byDate = eventsByDate(occurrences());
-  const mk = (off) => {
-    const d = new Date(TODAY);
-    d.setDate(TODAY.getDate() - TODAY.getDay() + (state.weekOffset + off) * 7);
-    return d;
-  };
+  const start = new Date(TODAY);
+  start.setDate(TODAY.getDate() - WEEK_PAST);
+  let rows = '';
+  let lastMonth = -1;
+  for (let i = 0; i <= WEEK_PAST + WEEK_FUTURE; i++) {
+    const dt = new Date(start);
+    dt.setDate(start.getDate() + i);
+    rows += weekDayRowHTML(dt, byDate, dt.getMonth() !== lastMonth);
+    lastMonth = dt.getMonth();
+  }
+  return `<div class="week-flow ${weekHomed ? 'homed' : ''}">${rows}</div>`;
+}
+
+function weekDayRowHTML(dt, byDate, showMonth) {
+  const ds = fmt(dt);
+  const isToday = sameDay(dt, TODAY);
+  // the "active window" is yesterday through today+6 — the 8 days that fill
+  // the view on entry; everything beyond it is grayed out
+  const lo = new Date(TODAY); lo.setDate(TODAY.getDate() - 1);
+  const hi = new Date(TODAY); hi.setDate(TODAY.getDate() + 6);
+  const isOut = ds < fmt(lo) || ds > fmt(hi);
+  // week reads chronologically: earliest due time first (all-day = 11:59 PM),
+  // difficulty breaks ties — month/agenda keep their hardest-first order
+  const evs = (byDate[ds] || []).slice().sort((a, b) => {
+    const ta = a.dueTime || '23:59', tb = b.dueTime || '23:59';
+    return ta < tb ? -1 : ta > tb ? 1 : b.difficulty - a.difficulty;
+  });
+  const active = evs.filter((e) => e.status !== 'done');
+  const done = evs.filter((e) => e.status === 'done');
+
+  const activeHTML = active.length ? `
+    <div class="wday-grid">
+      ${active.map((o) => {
+        const c = course(o.courseId);
+        return `
+          <div class="wcard" data-act="detail" data-id="${o.id}" draggable="true" style="--cc:${c.color};border-left-color:${c.color}">
+            <span class="check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
+            <div class="body-col">
+              <div class="wcard-title">${esc(o.title)}</div>
+              <div class="wcard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
+            </div>
+            ${dotsHTML(o.difficulty)}
+          </div>`;
+      }).join('')}
+    </div>` : '';
+
+  const doneHTML = done.length ? `
+    <div class="done-strip">
+      ${done.map((o) => {
+        const c = course(o.courseId);
+        return `
+          <div class="done-chip ${o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" title="${esc(o.title)}">
+            <span class="done-chip-check" data-act="toggle-done" data-done="1" data-id="${o.id}" data-base="${o._baseId || o.id}" style="background:${c.color}">✓</span>
+            <span class="done-chip-title">${esc(o.title)}</span>
+          </div>`;
+      }).join('')}
+    </div>` : '';
+
   return `
-    <div class="week-stage">
-      <div class="week-track">
-        <div class="week-panel side prev"><div class="week-wrap">${weekRowsHTML(mk(-1), byDate)}</div></div>
-        <div class="week-panel cur scrolly"><div class="week-wrap">${weekRowsHTML(mk(0), byDate)}</div></div>
-        <div class="week-panel side next"><div class="week-wrap">${weekRowsHTML(mk(1), byDate)}</div></div>
+    <div class="wday-row ${isToday ? 'today' : ''} ${isOut ? 'dim' : ''}" data-date="${ds}">
+      <div class="wday-date">
+        ${showMonth ? `<div class="wday-mo">${monthName(dt.getMonth()).slice(0, 3)}</div>` : ''}
+        <div class="wday-wd">${weekdayName(dt)}</div>
+        <div class="wday-num">${dt.getDate()}</div>
+        ${isToday ? '<div class="wday-today-tag">TODAY</div>' : ''}
+      </div>
+      <div class="wday-sep"></div>
+      <div class="wday-body">
+        ${activeHTML}${doneHTML}
+        ${evs.length === 0 ? '<div class="wday-empty">No assignments</div>' : ''}
       </div>
     </div>`;
 }
 
-function weekRowsHTML(wkStart, byDate) {
-  let rows = '';
-  for (let i = 0; i < 7; i++) {
-    const dt = new Date(wkStart);
-    dt.setDate(wkStart.getDate() + i);
-    const ds = fmt(dt);
-    const isToday = sameDay(dt, TODAY);
-    // week reads chronologically: earliest due time first (all-day = 11:59 PM),
-    // difficulty breaks ties — month/agenda keep their hardest-first order
-    const evs = (byDate[ds] || []).slice().sort((a, b) => {
-      const ta = a.dueTime || '23:59', tb = b.dueTime || '23:59';
-      return ta < tb ? -1 : ta > tb ? 1 : b.difficulty - a.difficulty;
-    });
-    const active = evs.filter((e) => e.status !== 'done');
-    const done = evs.filter((e) => e.status === 'done');
-
-    const activeHTML = active.length ? `
-      <div class="wday-grid">
-        ${active.map((o) => {
-          const c = course(o.courseId);
-          return `
-            <div class="wcard" data-act="detail" data-id="${o.id}" draggable="true" style="--cc:${c.color};border-left-color:${c.color}">
-              <span class="check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
-              <div class="body-col">
-                <div class="wcard-title">${esc(o.title)}</div>
-                <div class="wcard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
-              </div>
-              ${dotsHTML(o.difficulty)}
-            </div>`;
-        }).join('')}
-      </div>` : '';
-
-    const doneHTML = done.length ? `
-      <div class="done-strip">
-        ${done.map((o) => {
-          const c = course(o.courseId);
-          return `
-            <div class="done-chip ${o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" title="${esc(o.title)}">
-              <span class="done-chip-check" data-act="toggle-done" data-done="1" data-id="${o.id}" data-base="${o._baseId || o.id}" style="background:${c.color}">✓</span>
-              <span class="done-chip-title">${esc(o.title)}</span>
-            </div>`;
-        }).join('')}
-      </div>` : '';
-
-    rows += `
-      <div class="wday-row ${isToday ? 'today' : ''}" data-date="${ds}">
-        <div class="wday-date">
-          <div class="wday-wd">${weekdayName(dt)}</div>
-          <div class="wday-num">${dt.getDate()}</div>
-          ${isToday ? '<div class="wday-today-tag">TODAY</div>' : ''}
-        </div>
-        <div class="wday-sep"></div>
-        <div class="wday-body">
-          ${activeHTML}${doneHTML}
-          ${evs.length === 0 ? '<div class="wday-empty">No assignments</div>' : ''}
-        </div>
-      </div>`;
+// scroll helpers for the rolling list
+function unhomeWeek() {
+  if (!weekHomed) return;
+  weekHomed = false;
+  const flow = $('#main') && $('#main').querySelector('.week-flow');
+  if (flow) flow.classList.remove('homed'); // .dim fades out via transition
+}
+function topWeekRow() {
+  const main = $('#main');
+  if (!main) return null;
+  for (const row of main.querySelectorAll('.wday-row[data-date]')) {
+    if (row.offsetTop + row.offsetHeight - main.scrollTop > 40) return row;
   }
-  return rows;
+  return null;
+}
+// put yesterday at the top: prev day, today, and the coming week fill the view.
+// programmatic scrolls silence the day-ratchet haptic — ticks are for fingers
+function positionWeek(smooth) {
+  weekTopDate = null;
+  weekQuietUntil = Date.now() + 700;
+  weekHomed = true;
+  const main = $('#main');
+  const flow = main && main.querySelector('.week-flow');
+  if (flow) flow.classList.add('homed');
+  const yd = new Date(TODAY);
+  yd.setDate(TODAY.getDate() - 1);
+  const target = main && main.querySelector(`.wday-row[data-date="${fmt(yd)}"]`);
+  if (!target) return;
+  const top = target.offsetTop - 10;
+  if (smooth && !REDUCED_MOTION) {
+    main.scrollTo({ top, behavior: 'smooth' });
+    // land exactly: if layout shifted mid-glide, settle on the true anchor
+    setTimeout(() => {
+      if (state.view === 'week' && weekHomed) main.scrollTop = target.offsetTop - 10;
+    }, 550);
+  } else {
+    main.scrollTop = top;
+  }
+}
+function scrollWeek(days) {
+  const main = $('#main');
+  const top = topWeekRow();
+  if (!main || !top) return;
+  weekQuietUntil = Date.now() + 700;
+  unhomeWeek(); // navigating away from the window lifts the gray
+  const dt = parseDate(top.dataset.date);
+  dt.setDate(dt.getDate() + days);
+  const rows = main.querySelectorAll('.wday-row[data-date]');
+  const target = main.querySelector(`.wday-row[data-date="${fmt(dt)}"]`) ||
+    (days > 0 ? rows[rows.length - 1] : rows[0]);
+  if (!target) return;
+  main.scrollTo({ top: target.offsetTop - 10, behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
 }
 
 // ---- agenda ----
@@ -2347,9 +2411,9 @@ async function copyPrompt() {
 function goToday() {
   state.month = TODAY.getMonth();
   state.year = TODAY.getFullYear();
-  state.weekOffset = 0;
   if (state.view !== 'month' && state.view !== 'week') state.view = 'month';
   render();
+  if (state.view === 'week') positionWeek(true);
 }
 
 // ---------- undo toast ----------
@@ -2945,18 +3009,10 @@ document.addEventListener('keydown', (e) => {
 let snapDrag = 0, snapTimer = null;
 
 document.addEventListener('wheel', (e) => {
-  if (state.view !== 'month' && state.view !== 'week') return;
+  if (state.view !== 'month') return; // week scrolls natively, no snap
   if (anyModalOpen()) return;
   if (!e.target.closest || !e.target.closest('#main')) return;
-
-  let delta;
-  if (state.view === 'month') {
-    delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-  } else {
-    // week view scrolls its list vertically; horizontal drags the carousel
-    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
-    delta = e.deltaX;
-  }
+  const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
   e.preventDefault();
   onSnapWheel(delta);
 }, { passive: false });
@@ -3019,6 +3075,29 @@ function settleSnap() {
     tr.style.transform = `translate${axis}(0)`;
   }));
 }
+
+// week list: keep the titlebar month in step with whatever day is on top,
+// and tick the trackpad each time the top row crosses onto a new day
+// (scroll doesn't bubble, so listen in the capture phase)
+let weekTitleRaf = false;
+let weekTopDate = null;
+let weekQuietUntil = 0; // programmatic scrolls (Today, arrows) don't ratchet
+document.addEventListener('scroll', (e) => {
+  if (state.view !== 'week' || e.target !== $('#main') || weekTitleRaf) return;
+  weekTitleRaf = true;
+  requestAnimationFrame(() => {
+    weekTitleRaf = false;
+    const top = topWeekRow();
+    if (!top) return;
+    const userScroll = Date.now() > weekQuietUntil;
+    if (userScroll) unhomeWeek(); // first finger scroll lifts the gray window
+    const ds = top.dataset.date;
+    if (weekTopDate && weekTopDate !== ds && userScroll) hapticTick('align'); // day ratchet
+    weekTopDate = ds;
+    const dt = parseDate(ds);
+    $('#header-title').textContent = monthName(dt.getMonth()) + ' ' + dt.getFullYear();
+  });
+}, true);
 
 // haptic knock when a vertical scroll hits the top or bottom of the page
 let edgeLatchTop = false, edgeLatchBottom = false, edgeLastT = 0;

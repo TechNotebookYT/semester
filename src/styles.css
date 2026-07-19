@@ -398,18 +398,19 @@ input, select, textarea, button { font-family: inherit; }
 }
 .mmore:hover { background: var(--glass); color: var(--accent); }
 
-/* ---- Week view (peeking carousel) ---- */
-.week-stage { position: relative; height: 100%; overflow: hidden; }
-.week-track { position: absolute; inset: 0; will-change: transform; }
-.week-panel { position: absolute; top: 0; bottom: 0; }
-.week-panel.cur { left: 60px; right: 60px; overflow-y: auto; overscroll-behavior: contain; }
-.week-panel.side {
-  width: calc(100% - 120px);
-  opacity: .35; pointer-events: none; overflow: hidden;
+/* ---- Week view (rolling day list, free scroll) ---- */
+.week-flow {
+  padding: 20px 24px 30px; max-width: 860px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 10px;
 }
-.week-panel.side.prev { right: calc(100% - 44px); }
-.week-panel.side.next { left: calc(100% - 44px); }
-.week-wrap { padding: 20px 14px; display: flex; flex-direction: column; gap: 10px; }
+/* outside the active window (yesterday → today+6): grayed out — but only in
+   the "homed" state (view entry / Today); scrolling lifts it with a fade */
+.wday-row { transition: opacity .4s ease, filter .4s ease; }
+.week-flow.homed .wday-row.dim { opacity: .55; filter: grayscale(.7); }
+.wday-mo {
+  font-size: var(--fs-xs); font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: .05em;
+}
 .wday-row {
   display: flex; gap: 16px; align-items: stretch;
   padding: 12px 16px; border-radius: 16px;
