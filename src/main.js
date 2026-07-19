@@ -44,6 +44,7 @@ let state = {
   confirmNewTerm: false,
   dataError: '',
   dayPopover: null,      // 'YYYY-MM-DD' while a month day's full list is open
+  wallpaper: 'colorful', // 'colorful' | 'subtle' — neutral glass for long sessions
 };
 
 // occurrence id that just got completed — its reborn element pops in on the next render
@@ -54,7 +55,7 @@ function loadState() {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
       const d = JSON.parse(raw);
-      for (const k of ['theme', 'courses', 'assignments', 'grades', 'hidden', 'gradeCourse', 'notified', 'term']) {
+      for (const k of ['theme', 'courses', 'assignments', 'grades', 'hidden', 'gradeCourse', 'notified', 'term', 'wallpaper']) {
         if (d[k] !== undefined) state[k] = d[k];
       }
     }
@@ -80,6 +81,7 @@ function saveState() {
       gradeCourse: state.gradeCourse,
       notified: state.notified,
       term: state.term,
+      wallpaper: state.wallpaper,
     }));
   } catch (e) { /* storage unavailable */ }
 }
@@ -241,6 +243,45 @@ function playFlip(map, excludeId) {
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
     el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
       { duration: 320, easing: 'cubic-bezier(.3,.9,.4,1)' });
+  }
+}
+
+// sidebar FLIP: same idea as the main pane, keyed by the panel's stable
+// sections so the glance block and lists glide (not jump) when a to-do row
+// disappears and the empty text takes its place
+function sbKey(el) {
+  if (el.classList.contains('glance')) return 'glance';
+  if (el.dataset.id) return 'id:' + el.dataset.id;
+  const inner = el.querySelector('[data-id]');
+  if (inner) return 'in:' + inner.dataset.id;
+  return el.className.split(' ')[0] + ':' + (el.textContent || '').trim().slice(0, 20);
+}
+function captureSbFlip() {
+  if (REDUCED_MOTION) return null;
+  const sb = $('#sidebar');
+  if (!sb) return null;
+  const map = new Map();
+  for (const el of sb.children) {
+    const k = sbKey(el);
+    if (!map.has(k)) map.set(k, el.getBoundingClientRect());
+  }
+  return map;
+}
+function playSbFlip(map) {
+  if (!map) return;
+  const sb = $('#sidebar');
+  if (!sb) return;
+  const seen = new Set();
+  for (const el of sb.children) {
+    const k = sbKey(el);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const r0 = map.get(k);
+    if (!r0 || !el.animate) continue;
+    const dy = r0.top - el.getBoundingClientRect().top;
+    if (Math.abs(dy) < 1) continue;
+    el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }],
+      { duration: 300, easing: 'cubic-bezier(.3,.9,.4,1)' });
   }
 }
 
@@ -452,6 +493,7 @@ function refreshCourseJson() {
 
 function toggleDone(occId, baseId) {
   const flip = captureFlip();
+  const sbFlip = captureSbFlip();
   const base = baseId || occId;
   const now = new Date().toISOString();
   if (occId && occId.includes('@')) {
@@ -475,6 +517,7 @@ function toggleDone(occId, baseId) {
   render();
   // the celebrating card has its own morph; everything else glides
   playFlip(flip, completedPopId);
+  playSbFlip(sbFlip);
 }
 
 // ---------- calendar carousel (direct-manipulation scroll + snap) ----------
@@ -558,6 +601,7 @@ function updateBadge() {
 // ---------- render ----------
 function render() {
   document.documentElement.dataset.theme = state.theme;
+  document.documentElement.dataset.wall = state.wallpaper;
   renderTitlebar();
   renderSidebar();
   renderMain();
@@ -754,7 +798,9 @@ function renderSidebar() {
       </div>`
     : `<div class="glance-clear">Nothing due this week 🎉</div>`;
 
-  $('#sidebar').innerHTML = `
+  const sb = $('#sidebar');
+  const sbScroll = sb.scrollTop; // innerHTML swap must not nudge the panel's scroll
+  sb.innerHTML = `
     <div class="sb-brand">
       <span class="sb-logo">S</span>
       <div>
@@ -775,13 +821,13 @@ function renderSidebar() {
     </button>
 
     <div class="sb-head-row">
-      <span class="sb-head">Courses</span>
+      <button class="sb-head sb-head-btn" data-act="view" data-view="courses" title="Open Courses">Courses ${icon('chevR', 10, 2.6)}</button>
       <span class="sb-hint">check to show · click to open</span>
     </div>
     ${legendHTML}
 
     <div class="sb-head-row">
-      <span class="sb-head">To-Dos</span>
+      <button class="sb-head sb-head-btn" data-act="view" data-view="todos" title="Open To-Dos">To-Dos ${icon('chevR', 10, 2.6)}</button>
       <button class="todo-add-btn" data-act="add-todo" title="New to-do" aria-label="New to-do">${icon('plus', 13, 2.2)}</button>
     </div>
     ${todoListHTML()}
@@ -791,6 +837,7 @@ function renderSidebar() {
       ${statHTML}
       ${sections.join('')}
     </div>`;
+  sb.scrollTop = sbScroll;
 }
 
 // open to-dos, occurrence-aware (recurring items check off per date),
@@ -1182,6 +1229,15 @@ function coursesView() {
         <button class="btn-delete-course ${state.confirmNewTerm ? 'confirm' : ''}" data-act="new-semester">
           ${state.confirmNewTerm ? 'Really clear every course and item? Back up first. Click again.' : 'Start New Semester…'}
         </button>
+      </div>
+
+      <div class="side-card">
+        <div class="diff-scale-title">Appearance</div>
+        <p class="side-sub">Wallpaper for both light and dark mode.</p>
+        <div class="filter-row" style="margin-bottom:0;">
+          <button class="filter-pill ${state.wallpaper !== 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="colorful">Colorful</button>
+          <button class="filter-pill ${state.wallpaper === 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="subtle">Subtle</button>
+        </div>
       </div>
 
       <div class="side-card">
@@ -2393,6 +2449,11 @@ document.addEventListener('click', (e) => {
       } else {
         playCompleteAnim(el);
       }
+      break;
+    }
+    case 'wallpaper': {
+      state.wallpaper = el.dataset.w;
+      render();
       break;
     }
     case 'agenda-filter': {

@@ -79,6 +79,16 @@ input, textarea { user-select: text; cursor: text; }
   --top-on: rgba(255,255,255,0.18);
 }
 
+/* "Subtle" wallpaper: neutral glass, no candy gradients — for long sessions */
+[data-theme="light"][data-wall="subtle"] {
+  --wall: radial-gradient(120% 120% at 20% 10%, #eef0f4 0%, rgba(238,240,244,0) 55%),
+          linear-gradient(160deg, #e9eaef 0%, #f3f3f7 100%);
+}
+[data-theme="dark"][data-wall="subtle"] {
+  --wall: radial-gradient(120% 120% at 20% 10%, #1c1c22 0%, rgba(28,28,34,0) 55%),
+          linear-gradient(160deg, #141419 0%, #1a1a21 100%);
+}
+
 a { color: var(--accent); text-decoration: none; }
 a:hover { opacity: .8; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -247,7 +257,16 @@ input, select, textarea, button { font-family: inherit; }
 .legend-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend-code { font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; flex: none; }
 .legend-open:hover .legend-name { color: var(--accent); }
-.legend-empty { font-size: var(--fs-sm); color: var(--text-faint); padding: 6px 8px; }
+.legend-empty { font-size: var(--fs-sm); color: var(--text-faint); padding: 6px 8px; animation: fadein .35s ease; }
+
+/* sidebar section headers that double as links */
+.sb-head-btn {
+  border: none; background: transparent; cursor: pointer; text-align: left;
+  display: inline-flex; align-items: center; gap: 3px;
+  transition: color .18s ease;
+}
+.sb-head-btn:hover { color: var(--accent); }
+.sb-head-btn .icn { opacity: .6; }
 
 /* sidebar to-dos */
 .todo-add-btn {
