@@ -43,6 +43,9 @@ let state = {
   confirmNewTerm: false,
   dataError: '',
   dayPopover: null,      // 'YYYY-MM-DD' while a month day's full list is open
+  formError: '',
+  glanceOpen: null,      // which At-a-Glance tile is expanded
+  gradeOpen: {},         // grade categories showing their score list
   wallpaper: 'colorful', // 'colorful' | 'subtle' — neutral glass for long sessions
 };
 
@@ -187,6 +190,39 @@ function icon(name, size = 18, sw = 1.8) {
 
 const REDUCED_MOTION = window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------- smooth scrolling ----------
+// hand-rolled easing instead of scrollTo({behavior:'smooth'}): it lands
+// exactly on the target, its duration scales with distance, and it can be
+// cancelled the instant the user touches the trackpad
+let scrollAnimId = 0;
+function cancelScrollAnim() { scrollAnimId++; }
+function smoothScrollTo(el, top, done) {
+  cancelScrollAnim();
+  const max = el.scrollHeight - el.clientHeight;
+  const target = Math.max(0, Math.min(max, top));
+  const start = el.scrollTop;
+  const delta = target - start;
+  if (REDUCED_MOTION || Math.abs(delta) < 1) {
+    el.scrollTop = target;
+    if (done) done();
+    return;
+  }
+  const dur = Math.min(760, 260 + Math.abs(delta) * 0.32);
+  const t0 = performance.now();
+  const mine = scrollAnimId;
+  el.classList.add('no-snap'); // CSS scroll-snap would fight a per-frame write
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  const step = (now) => {
+    if (mine !== scrollAnimId) { el.classList.remove('no-snap'); return; }
+    const t = Math.min(1, (now - t0) / dur);
+    el.scrollTop = start + delta * ease(t);
+    if (t < 1) { requestAnimationFrame(step); return; }
+    el.classList.remove('no-snap');
+    if (done) done();
+  };
+  requestAnimationFrame(step);
+}
 
 // ---------- FLIP: smooth layout shifts ----------
 // when a check-off or reschedule re-renders, everything that merely moved
@@ -402,7 +438,7 @@ function playCompleteAnim(checkEl) {
   const occId = checkEl.dataset.id;
   const baseId = checkEl.dataset.base;
   if (REDUCED_MOTION) { toggleDone(occId, baseId); return; }
-  const card = checkEl.closest('.wcard, .acard, .todo-row, .ctask-row');
+  const card = checkEl.closest('.wcard, .acard, .todo-row, .ctask-row, .glance-item');
 
   checkEl.classList.add('checking');
   hapticTick('align');
@@ -419,7 +455,7 @@ function playCompleteAnim(checkEl) {
 
   if (card) {
     card.classList.add('completing');
-    const title = card.querySelector('.wcard-title, .acard-title, .todo-title, .ctask-title');
+    const title = card.querySelector('.wcard-title, .acard-title, .todo-title, .ctask-title, .gc-title');
     if (title) setTimeout(() => title.classList.add('strike-anim'), 120);
   }
 
@@ -519,53 +555,17 @@ function toggleDone(occId, baseId) {
   playSbFlip(sbFlip);
 }
 
-// ---------- month carousel (direct-manipulation scroll + snap) ----------
-// (week is a free-scrolling day list — only month snaps)
-function trackEl() {
-  return $('.month-track');
-}
-function trackAxis() {
-  return 'Y';
-}
-function panelDistance() {
-  const st = $('.month-stage');
-  return st ? st.clientHeight : 0;
-}
-
-// advance the month and re-render just the calendar surfaces —
-// sidebar/modals don't depend on the visible month, and skipping them
-// keeps mid-gesture commits cheap
-function navCommit(dir) {
-  state.month += dir;
-  if (state.month < 0) { state.month = 11; state.year--; }
-  if (state.month > 11) { state.month = 0; state.year++; }
-  hapticTick('strong');
-  renderTitlebar();
-  renderMain();
-}
-
-// button navigation: month commits + glides; week scrolls the day list ±7 days
+// ---------- calendar navigation ----------
+// both calendars are now plain scrollers: month snaps per week (CSS), week
+// flows freely. The arrows move a month / a week respectively.
 function navCalendar(dir) {
   if (state.view === 'week') {
     scrollWeek(dir * 7);
     hapticTick('align');
     return;
   }
-  navCommit(dir);
-  animateNav(dir);
-}
-function animateNav(dir) {
-  if (REDUCED_MOTION) return;
-  const tr = trackEl();
-  if (!tr) return;
-  const D = panelDistance();
-  const axis = trackAxis();
-  tr.style.transition = 'none';
-  tr.style.transform = `translate${axis}(${dir * D}px)`;
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    tr.style.transition = 'transform .26s cubic-bezier(.25,.8,.35,1)';
-    tr.style.transform = `translate${axis}(0)`;
-  }));
+  scrollMonth(dir);
+  hapticTick('align');
 }
 
 // trackpad haptic (macOS Force Touch) — silently a no-op outside Tauri
@@ -781,22 +781,61 @@ function renderSidebar() {
       </div>`);
   }
 
+  // stat tiles are buttons: clicking one expands the actual items beneath
+  const tileSets = {
+    overdue: { items: overdue, label: 'Overdue', color: '#ff453a' },
+    today: { items: dueToday, label: 'Due today', color: '#ff9f0a' },
+    week: { items: dueWeek, label: 'This week', color: 'var(--text)' },
+  };
+  if (state.glanceOpen && !tileSets[state.glanceOpen].items.length) state.glanceOpen = null;
+
+  const tile = (key) => {
+    const t = tileSets[key];
+    const on = state.glanceOpen === key;
+    const empty = !t.items.length;
+    return `
+      <button class="stat-tile ${key === 'overdue' && t.items.length ? 'alert' : ''} ${on ? 'open' : ''} ${empty ? 'empty' : ''}"
+              data-act="glance-open" data-key="${key}" ${empty ? 'disabled' : ''}
+              aria-expanded="${on}" title="${empty ? 'Nothing ' + t.label.toLowerCase() : 'Show ' + t.label.toLowerCase()}">
+        <div class="stat-num" style="color:${empty ? 'var(--text-faint)' : t.color}">${t.items.length}</div>
+        <div class="stat-label">${t.label}</div>
+      </button>`;
+  };
+
+  let expandHTML = '';
+  if (state.glanceOpen) {
+    const t = tileSets[state.glanceOpen];
+    const rows = t.items.slice()
+      .sort((a, b) => {
+        const d = (a.dueDate || '').localeCompare(b.dueDate || '');
+        return d || (a.dueTime || '23:59').localeCompare(b.dueTime || '23:59');
+      })
+      .slice(0, 12)
+      .map((o) => {
+        const c = course(o.courseId);
+        const dt = parseDate(o.dueDate);
+        const when = state.glanceOpen === 'today'
+          ? (o.dueTime ? timeLabel(o.dueTime) : 'All day')
+          : monthName(dt.getMonth()).slice(0, 3) + ' ' + dt.getDate();
+        return `
+          <div class="glance-item" data-act="detail" data-id="${o.id}" style="border-left:3px solid ${c.color}">
+            <span class="check gi-check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
+            <div class="gc-body">
+              <div class="gc-title">${esc(o.title)}</div>
+              <div class="gc-meta">${esc(c.code || c.name)}</div>
+            </div>
+            <span class="gc-count">${esc(when)}</span>
+          </div>`;
+      }).join('');
+    expandHTML = `
+      <div class="glance-expand">
+        ${rows}
+        ${t.items.length > 12 ? `<div class="glance-more">+${t.items.length - 12} more</div>` : ''}
+      </div>`;
+  }
+
   const statHTML = (overdue.length || dueToday.length || dueWeek.length)
-    ? `
-      <div class="stat-row">
-        <div class="stat-tile ${overdue.length ? 'alert' : ''}">
-          <div class="stat-num" style="color:${overdue.length ? '#ff453a' : 'var(--text-faint)'}">${overdue.length}</div>
-          <div class="stat-label">Overdue</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-num" style="color:${dueToday.length ? '#ff9f0a' : 'var(--text)'}">${dueToday.length}</div>
-          <div class="stat-label">Due today</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-num">${dueWeek.length}</div>
-          <div class="stat-label">This week</div>
-        </div>
-      </div>`
+    ? `<div class="stat-row">${tile('overdue')}${tile('today')}${tile('week')}</div>${expandHTML}`
     : `<div class="glance-clear">Nothing due this week 🎉</div>`;
 
   const sb = $('#sidebar');
@@ -925,8 +964,17 @@ function renderMain() {
       });
     }
   }
-  // entering week: land with yesterday at the top (prev day + today + 6 ahead)
-  if (state.view === 'week' && !sameView) positionWeek(false);
+  // week snapping would fight the free-scrolling day list; only month snaps
+  main.classList.toggle('snap-weeks', state.view === 'month');
+  // entering a calendar: land on the right place
+  if (!sameView) {
+    if (state.view === 'week') positionWeek(false);
+    else if (state.view === 'month') {
+      // current month → land on today's week; any other month → its 1st
+      const inThisMonth = state.year === TODAY.getFullYear() && state.month === TODAY.getMonth();
+      positionMonth(inThisMonth ? TODAY : new Date(state.year, state.month, 1), false);
+    }
+  }
   renderMain._last = state.view;
 }
 
@@ -937,69 +985,127 @@ function eventsByDate(occ) {
   return byDate;
 }
 
-// ---- month ----
+// ---- month (continuous week scroller) ----
+// One unbroken column of week rows rather than per-month grids, so the week
+// straddling a month boundary is rendered ONCE (it used to appear as the last
+// row of one month and again as the first row of the next). Months are told
+// apart by an alternating tint plus a labelled boundary, and the scroller
+// snaps per week.
+const MONTH_PAST_WEEKS = 26, MONTH_FUTURE_WEEKS = 78;
+
+function weekStartOf(dt) {
+  const d = new Date(dt);
+  d.setDate(d.getDate() - d.getDay());
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+// anchored on TODAY (not the visible month) so the rendered range — and any
+// preserved scroll offset — stays stable across re-renders
+function monthFlowStart() {
+  const s = weekStartOf(TODAY);
+  s.setDate(s.getDate() - MONTH_PAST_WEEKS * 7);
+  return s;
+}
+
 function monthView() {
   const byDate = eventsByDate(occurrences());
-  const pm = state.month === 0 ? { y: state.year - 1, m: 11 } : { y: state.year, m: state.month - 1 };
-  const nm = state.month === 11 ? { y: state.year + 1, m: 0 } : { y: state.year, m: state.month + 1 };
+  const start = monthFlowStart();
+  let rows = '';
+  for (let w = 0; w < MONTH_PAST_WEEKS + MONTH_FUTURE_WEEKS; w++) {
+    const wk = new Date(start);
+    wk.setDate(start.getDate() + w * 7);
+    rows += monthWeekRowHTML(wk, byDate);
+  }
   return `
     <div class="month-wrap">
       <div class="month-heads">
         ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((w) => `<div class="month-head">${w}</div>`).join('')}
       </div>
-      <div class="month-stage">
-        <div class="month-track">
-          <div class="month-panel prev">${monthGridHTML(pm.y, pm.m, byDate)}</div>
-          <div class="month-panel cur">${monthGridHTML(state.year, state.month, byDate)}</div>
-          <div class="month-panel next">${monthGridHTML(nm.y, nm.m, byDate)}</div>
-        </div>
-      </div>
+      <div class="month-flow">${rows}</div>
     </div>`;
 }
 
-function monthGridHTML(year, month, byDate) {
-  const first = new Date(year, month, 1);
-  const startOffset = first.getDay();
-  const lastDay = new Date(year, month + 1, 0).getDate();
-  const weekCount = Math.ceil((startOffset + lastDay) / 7);
-  const cursor = new Date(year, month, 1 - startOffset);
+function monthWeekRowHTML(wkStart, byDate) {
+  let cells = '';
+  let startsMonth = false;
+  for (let dd = 0; dd < 7; dd++) {
+    const dt = new Date(wkStart);
+    dt.setDate(wkStart.getDate() + dd);
+    const ds = fmt(dt);
+    const isToday = sameDay(dt, TODAY);
+    const first = dt.getDate() === 1;
+    if (first) startsMonth = true;
+    // alternating tint: adjacent months read as distinct bands
+    const alt = dt.getMonth() % 2;
+    const evs = byDate[ds] || [];
 
-  let rows = '';
-  for (let w = 0; w < weekCount; w++) {
-    let cells = '';
-    for (let dd = 0; dd < 7; dd++) {
-      const dt = new Date(cursor);
-      const ds = fmt(dt);
-      const inMonth = dt.getMonth() === month;
-      const isToday = sameDay(dt, TODAY);
-      const evs = byDate[ds] || [];
-      const shown = evs.slice(0, 2);
-
-      const chips = shown.map((o) => {
-        const c = course(o.courseId);
-        const done = o.status === 'done';
-        return `
-          <div class="mchip ${done ? 'done' : ''}" data-act="detail" data-id="${o.id}" draggable="true" style="border-left-color:${c.color}">
-            <span class="mchip-title" lang="en">${esc(o.title)}</span>
-            ${filledDotsHTML(o.difficulty)}
-          </div>`;
-      }).join('');
-
-      cells += `
-        <div class="mday ${inMonth ? '' : 'out'} ${isToday ? 'today' : ''}" data-date="${ds}">
-          <div class="mday-numrow">
-            <button class="mday-add" data-act="day-add" data-date="${ds}" title="Add assignment" aria-label="Add assignment on ${ds}">${icon('plus', 12, 2.4)}</button>
-            <span class="mday-num">${dt.getDate()}</span>
-          </div>
-          ${chips}
-          ${evs.length > 2 ? `<button class="mmore" data-act="day-more" data-date="${ds}">+${evs.length - 2} more</button>` : ''}
+    const chips = evs.slice(0, 2).map((o) => {
+      const c = course(o.courseId);
+      const done = o.status === 'done';
+      return `
+        <div class="mchip ${done ? 'done' : ''}" data-act="detail" data-id="${o.id}" draggable="true" style="border-left-color:${c.color}">
+          <span class="mchip-title" lang="en">${esc(o.title)}</span>
+          ${filledDotsHTML(o.difficulty)}
         </div>`;
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    rows += `<div class="month-row">${cells}</div>`;
-  }
+    }).join('');
 
-  return `<div class="month-grid" style="grid-template-rows:repeat(${weekCount},1fr)">${rows}</div>`;
+    cells += `
+      <div class="mday alt${alt} ${isToday ? 'today' : ''} ${first ? 'mo-start' : ''}" data-date="${ds}">
+        <div class="mday-numrow">
+          <button class="mday-add" data-act="day-add" data-date="${ds}" title="Add assignment" aria-label="Add assignment on ${ds}">${icon('plus', 12, 2.4)}</button>
+          <span class="mday-num">${first ? monthName(dt.getMonth()).slice(0, 3) + ' ' : ''}${dt.getDate()}</span>
+        </div>
+        ${chips}
+        ${evs.length > 2 ? `<button class="mmore" data-act="day-more" data-date="${ds}">+${evs.length - 2} more</button>` : ''}
+      </div>`;
+  }
+  return `<div class="month-row ${startsMonth ? 'mo-break' : ''}" data-week="${fmt(wkStart)}">${cells}</div>`;
+}
+
+// the week row currently at the top of the viewport (below the sticky heads)
+function topMonthRow() {
+  const main = $('#main');
+  if (!main) return null;
+  const heads = main.querySelector('.month-heads');
+  const cut = main.scrollTop + (heads ? heads.offsetHeight : 0) + 8;
+  for (const row of main.querySelectorAll('.month-row[data-week]')) {
+    if (row.offsetTop + row.offsetHeight > cut) return row;
+  }
+  return null;
+}
+function monthRowTop(row) {
+  const heads = $('#main') && $('#main').querySelector('.month-heads');
+  return row.offsetTop - (heads ? heads.offsetHeight : 0);
+}
+// scroll so the week containing `date` sits just under the weekday heads
+function positionMonth(date, smooth) {
+  const main = $('#main');
+  if (!main) return;
+  monthQuietUntil = Date.now() + 900;
+  const target = main.querySelector(`.month-row[data-week="${fmt(weekStartOf(date))}"]`);
+  if (!target) return;
+  if (smooth) smoothScrollTo(main, monthRowTop(target));
+  else main.scrollTop = monthRowTop(target);
+  syncMonthTitle();
+}
+// arrows: jump a whole month, landing on the week that holds the 1st
+function scrollMonth(dir) {
+  const top = topMonthRow();
+  const ref = top ? parseDate(top.dataset.week) : TODAY;
+  // the row's own month is whichever month owns most of its days
+  const mid = new Date(ref); mid.setDate(ref.getDate() + 3);
+  const d = new Date(mid.getFullYear(), mid.getMonth() + dir, 1);
+  positionMonth(d, true);
+}
+// header follows the month owning the top visible week
+function syncMonthTitle() {
+  const top = topMonthRow();
+  if (!top) return;
+  const wk = parseDate(top.dataset.week);
+  wk.setDate(wk.getDate() + 3); // midweek decides the month
+  state.year = wk.getFullYear();
+  state.month = wk.getMonth();
+  $('#header-title').textContent = monthName(wk.getMonth()) + ' ' + wk.getFullYear();
 }
 
 // ---- week (rolling day list) ----
@@ -1053,7 +1159,7 @@ function weekDayRowHTML(dt, byDate, showMonth) {
             <span class="check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
             <div class="body-col">
               <div class="wcard-title">${esc(o.title)}</div>
-              <div class="wcard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
+              <div class="wcard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.code || c.name)}</div>
             </div>
             ${dotsHTML(o.difficulty)}
           </div>`;
@@ -1117,15 +1223,8 @@ function positionWeek(smooth) {
   const target = main && main.querySelector(`.wday-row[data-date="${fmt(yd)}"]`);
   if (!target) return;
   const top = target.offsetTop - 10;
-  if (smooth && !REDUCED_MOTION) {
-    main.scrollTo({ top, behavior: 'smooth' });
-    // land exactly: if layout shifted mid-glide, settle on the true anchor
-    setTimeout(() => {
-      if (state.view === 'week' && weekHomed) main.scrollTop = target.offsetTop - 10;
-    }, 550);
-  } else {
-    main.scrollTop = top;
-  }
+  if (smooth) smoothScrollTo(main, top);
+  else main.scrollTop = top;
 }
 function scrollWeek(days) {
   const main = $('#main');
@@ -1139,7 +1238,7 @@ function scrollWeek(days) {
   const target = main.querySelector(`.wday-row[data-date="${fmt(dt)}"]`) ||
     (days > 0 ? rows[rows.length - 1] : rows[0]);
   if (!target) return;
-  main.scrollTo({ top: target.offsetTop - 10, behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
+  smoothScrollTo(main, target.offsetTop - 10);
 }
 
 // ---- agenda ----
@@ -1189,7 +1288,7 @@ function agendaView() {
           <span class="acard-swatch" style="background:${c.color}"></span>
           <div class="body-col">
             <div class="acard-title ${done ? 'done' : ''}">${esc(o.title)}</div>
-            <div class="acard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
+            <div class="acard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.code || c.name)}</div>
           </div>
           <span class="type-pill">${esc(o.type)}</span>
           ${dotsHTML(o.difficulty)}
@@ -1306,10 +1405,10 @@ function coursesView() {
 
       <div class="side-card">
         <div class="diff-scale-title">Your data</div>
-        <p class="side-sub">Everything lives on this Mac. Back it up to a file you can restore later or move to another machine.</p>
+        <p class="side-sub">Everything lives on this Mac. Export writes your whole configuration — courses, assignments, grades, to-dos, term and appearance — to one <code>.json</code> file you can restore here or on another machine.</p>
         <div class="data-row">
-          <button class="btn-secondary" data-act="backup-export">Back Up…</button>
-          <label class="btn-secondary file-btn">Restore…<input type="file" accept=".json,application/json" data-input="restore-file" style="display:none;"></label>
+          <button class="btn-confirm" data-act="backup-export">${icon('download', 14, 2)} Export All Data…</button>
+          <label class="btn-secondary file-btn">Import Backup…<input type="file" accept=".json,application/json" data-input="restore-file" style="display:none;"></label>
         </div>
         ${state.dataError ? `<div class="import-error">${esc(state.dataError)}</div>` : ''}
       </div>
@@ -1527,7 +1626,11 @@ function buildCourseJson(cid) {
   const c = course(cid);
   return JSON.stringify({
     course: { name: c.name, code: c.code, color: c.color },
-    grades: (state.grades[cid] || []).map((g) => ({ name: g.name, weight: g.weight, score: g.score })),
+    grades: (state.grades[cid] || []).map((g) => {
+      const o = { name: g.name, weight: g.weight, score: g.score };
+      if (g.scores) o.scores = g.scores;
+      return o;
+    }),
     assignments: state.assignments.filter((a) => a.courseId === cid).map((a) => {
       const o = {
         title: a.title, dueDate: a.dueDate, dueTime: a.dueTime,
@@ -1567,6 +1670,8 @@ function applyCourseJson() {
         name: g.name || 'Category',
         weight: parseFloat(g.weight) || 0,
         score: (g.score === 0 || g.score) ? g.score : '',
+        scores: typeof g.scores === 'string' ? g.scores
+          : Array.isArray(g.scores) ? g.scores.join(', ') : '',
       })),
     });
   }
@@ -1599,14 +1704,39 @@ function applyCourseJson() {
 }
 
 // ---- grades ----
+// a category can hold a list of individual scores ("88, 92, 79") that average
+// into its percentage — enter each quiz as it comes back instead of doing the
+// arithmetic yourself. Blank/garbage entries are ignored.
+function parseScoreList(s) {
+  return String(s || '')
+    .split(/[,\s;]+/)
+    .filter(Boolean)
+    .map((x) => parseFloat(x.replace('%', '')))
+    .filter((n) => !isNaN(n));
+}
+function scoreAvg(list) {
+  if (!list.length) return null;
+  return list.reduce((a, b) => a + b, 0) / list.length;
+}
+// the percentage a category contributes: the list's average when it has one,
+// otherwise the single score typed in the % field
+function catScore(cat) {
+  if (cat.scores) {
+    const avg = scoreAvg(parseScoreList(cat.scores));
+    if (avg !== null) return avg;
+  }
+  const sc = (cat.score === '' || cat.score === null || cat.score === undefined) ? null : parseFloat(cat.score);
+  return sc !== null && !isNaN(sc) ? sc : null;
+}
+
 function gradeCalc(cid) {
   const cats = (state.grades && state.grades[cid]) || [];
   let wSum = 0, wScore = 0, totalW = 0;
   for (const cat of cats) {
     const wt = parseFloat(cat.weight) || 0;
     totalW += wt;
-    const sc = (cat.score === '' || cat.score === null || cat.score === undefined) ? null : parseFloat(cat.score);
-    if (sc !== null && !isNaN(sc)) { wSum += wt; wScore += sc * wt; }
+    const sc = catScore(cat);
+    if (sc !== null) { wSum += wt; wScore += sc * wt; }
   }
   return { cats, wSum, totalW, overall: wSum > 0 ? wScore / wSum : null };
 }
@@ -1673,6 +1803,15 @@ function gradeTargetsHTML(cid) {
     </div>`;
 }
 
+function scoreMetaText(cat) {
+  const list = parseScoreList(cat.scores);
+  if (!list.length) return 'Type each score as you get it — their average becomes this category’s %.';
+  const avg = scoreAvg(list);
+  const lo = Math.min(...list), hi = Math.max(...list);
+  return `${list.length} score${list.length === 1 ? '' : 's'} · avg ${Math.round(avg * 100) / 100}%` +
+    (list.length > 1 ? ` · low ${lo}% · high ${hi}%` : '');
+}
+
 function gradesView() {
   const cid = gradeCourseId();
   if (!cid) {
@@ -1689,13 +1828,31 @@ function gradesView() {
   const options = state.courses.map((o) =>
     `<option value="${o.id}" ${o.id === cid ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
 
-  const rows = cats.map((cat) => `
-    <div class="grade-row">
-      <input class="gname" value="${esc(cat.name)}" data-input="grade-name" data-id="${cat.id}">
-      <input class="gnum" type="number" value="${esc(cat.weight)}" data-input="grade-weight" data-id="${cat.id}">
-      <input class="gnum" type="number" value="${esc(cat.score)}" placeholder="—" data-input="grade-score" data-id="${cat.id}">
-      <button class="gdel" data-act="grade-remove" data-id="${cat.id}" title="Remove">×</button>
-    </div>`).join('');
+  const rows = cats.map((cat) => {
+    const list = parseScoreList(cat.scores);
+    const avg = scoreAvg(list);
+    const listed = avg !== null; // the list drives the % — lock the single field
+    const open = state.gradeOpen[cat.id] || listed;
+    return `
+    <div class="grade-row-wrap ${open ? 'open' : ''}">
+      <div class="grade-row">
+        <input class="gname" value="${esc(cat.name)}" data-input="grade-name" data-id="${cat.id}">
+        <input class="gnum" type="number" value="${esc(cat.weight)}" data-input="grade-weight" data-id="${cat.id}">
+        <input class="gnum ${listed ? 'derived' : ''}" type="number" data-id="${cat.id}"
+               value="${listed ? Math.round(avg * 100) / 100 : esc(cat.score)}" placeholder="—"
+               ${listed ? 'readonly title="Averaged from the scores below"' : ''} data-input="grade-score">
+        <button class="glist ${open ? 'on' : ''}" data-act="grade-list" data-id="${cat.id}"
+                title="Enter individual scores" aria-label="Enter individual scores" aria-expanded="${open}">${icon('todos', 14)}</button>
+        <button class="gdel" data-act="grade-remove" data-id="${cat.id}" title="Remove">×</button>
+      </div>
+      ${open ? `
+      <div class="grade-sub">
+        <input class="field gscores" value="${esc(cat.scores || '')}" data-input="grade-scores" data-id="${cat.id}"
+               placeholder="Individual scores, comma separated — e.g. 88, 92, 79.5" spellcheck="false">
+        <div class="gscores-meta" data-meta="${cat.id}">${scoreMetaText(cat)}</div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
 
   return `
     <div class="page-wrap grades">
@@ -1819,6 +1976,22 @@ function animateModalClose(fn) {
   setTimeout(() => { fn(); render(); }, 160);
 }
 
+// redraw just the modal and put focus/caret back where it was — used by the
+// form's own controls so interacting with them never interrupts typing
+function refreshModal() {
+  const a = document.activeElement;
+  const key = a && a.dataset ? a.dataset.input : null;
+  let caret = null;
+  try { caret = a && a.selectionStart; } catch (e) { /* date/time inputs throw */ }
+  renderModals();
+  decorateA11y();
+  if (!key) return;
+  const el = document.querySelector(`[data-input="${key}"]`);
+  if (!el) return;
+  el.focus();
+  try { if (caret != null) el.setSelectionRange(caret, caret); } catch (e) { /* not text */ }
+}
+
 function renderModals() {
   const root = $('#modal-root');
   if (state.quickAdd) root.innerHTML = quickAddHTML();
@@ -1849,7 +2022,7 @@ function dayPopoverHTML() {
         <span class="acard-swatch" style="background:${c.color}"></span>
         <div class="body-col">
           <div class="acard-title ${done ? 'done' : ''}">${esc(o.title)}</div>
-          <div class="acard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.name)}</div>
+          <div class="acard-meta">${(o.dueTime ? timeLabel(o.dueTime) + ' · ' : '')}${esc(c.code || c.name)}</div>
         </div>
         ${dotsHTML(o.difficulty)}
       </div>`;
@@ -2040,6 +2213,12 @@ function formModalHTML(mode) {
     const st = on ? `background:${DIFF[d - 1]};color:#fff;border-color:${DIFF[d - 1]}` : '';
     return `<button class="diff-btn" data-act="add-diff" data-n="${d}" style="${st}">${d}</button>`;
   }).join('');
+  // one-tap dates so nobody has to type three segments into a native picker
+  const mkChip = (off, label) => {
+    const d = new Date(TODAY); d.setDate(TODAY.getDate() + off);
+    return { ds: fmt(d), label };
+  };
+  const dateChips = [mkChip(0, 'Today'), mkChip(1, 'Tomorrow'), mkChip(7, 'Next week')];
 
   return `
     <div class="overlay" data-act="${mode === 'edit' ? 'close-edit' : 'close-add'}">
@@ -2060,15 +2239,20 @@ function formModalHTML(mode) {
           </div>
         </div>
 
-        <div class="frow">
+        <div class="frow" style="margin-bottom:8px;">
           <div class="grow">
             <label class="field-label">Due date</label>
             <input type="date" class="field" value="${esc(n.dueDate)}" data-input="new-date">
           </div>
           <div class="w130">
-            <label class="field-label">Time</label>
-            <input type="time" class="field" value="${esc(n.dueTime)}" data-input="new-time">
+            <label class="field-label">Time <span class="field-hint">optional</span></label>
+            <input type="time" class="field" value="${esc(n.dueTime)}" data-input="new-time" placeholder="11:59 PM">
           </div>
+        </div>
+        <div class="quick-row mb14">
+          ${dateChips.map((q) => `
+            <button class="quick-chip ${n.dueDate === q.ds ? 'on' : ''}" data-act="add-date-quick" data-date="${q.ds}">${q.label}</button>`).join('')}
+          <span class="quick-note">${n.dueTime ? '' : 'Leave time blank for 11:59 PM'}</span>
         </div>
 
         <label class="field-label" style="margin-bottom:7px;">Difficulty</label>
@@ -2104,6 +2288,7 @@ function formModalHTML(mode) {
         <label class="field-label">Notes</label>
         <textarea class="field mb16" rows="3" data-input="new-notes" placeholder="Optional — chapters, format, links…">${esc(n.notes || '')}</textarea>
 
+        ${state.formError ? `<div class="form-error">${esc(state.formError)}</div>` : ''}
         <div class="modal-foot">
           <button class="btn-secondary" data-act="${mode === 'edit' ? 'close-edit-btn' : 'close-add-btn'}">Cancel</button>
           <button class="btn-confirm" data-act="${mode === 'edit' ? 'save-edit' : 'save-add'}">${mode === 'edit' ? 'Save' : 'Add'}</button>
@@ -2239,6 +2424,7 @@ function confirmReview() {
         name: g.name || 'Category',
         weight: parseFloat(g.weight) || 0,
         score: old && (old.score === 0 || old.score) ? old.score : '',
+        scores: (old && old.scores) || '',
       };
     });
     state.grades = Object.assign({}, state.grades, { [cid]: cats });
@@ -2292,12 +2478,16 @@ async function exportICS(list, filename) {
 }
 
 // ---------- backup / restore ----------
+// the complete app configuration — everything that would be lost if this
+// Mac's storage were cleared, in one restorable file
 function backupJSON() {
   return JSON.stringify({
     app: 'semester',
     version: 1,
     exportedAt: new Date().toISOString(),
     term: state.term,
+    theme: state.theme,
+    wallpaper: state.wallpaper,
     courses: state.courses,
     assignments: state.assignments,
     grades: state.grades,
@@ -2316,8 +2506,11 @@ function restoreBackup(j) {
   const prev = {
     term: state.term, courses: state.courses, assignments: state.assignments,
     grades: state.grades, hidden: state.hidden, gradeCourse: state.gradeCourse,
+    theme: state.theme, wallpaper: state.wallpaper,
   };
   state.term = j.term || null;
+  if (j.theme === 'light' || j.theme === 'dark') state.theme = j.theme;
+  if (j.wallpaper) state.wallpaper = j.wallpaper;
   state.courses = j.courses;
   state.assignments = j.assignments;
   state.grades = j.grades || {};
@@ -2409,11 +2602,20 @@ async function copyPrompt() {
 }
 
 function goToday() {
+  const wasCal = state.view === 'month' || state.view === 'week';
   state.month = TODAY.getMonth();
   state.year = TODAY.getFullYear();
-  if (state.view !== 'month' && state.view !== 'week') state.view = 'month';
+  if (!wasCal) state.view = 'month';
+  // already on a calendar: don't re-render, just glide — a re-render would
+  // rebuild the list and make the scroll jump instead of animate
+  if (wasCal) {
+    if (state.view === 'week') positionWeek(true);
+    else positionMonth(TODAY, true);
+    hapticTick('align');
+    return;
+  }
   render();
-  if (state.view === 'week') positionWeek(true);
+  positionMonth(TODAY, false);
 }
 
 // ---------- undo toast ----------
@@ -2444,6 +2646,14 @@ function dismissToast() {
 }
 
 // ---------- grade helpers ----------
+// live-refresh the derived blocks without touching the rows (focus stays put)
+function refreshGradeTotals(cid) {
+  const summary = $('#grade-summary');
+  if (summary) summary.innerHTML = gradeSummaryHTML(cid);
+  const targets = $('#grade-targets-wrap');
+  if (targets) targets.innerHTML = gradeTargetsHTML(cid);
+}
+
 function updateCat(cid, id, field, val) {
   const arr = (state.grades[cid] || []).map((c) => (c.id === id ? Object.assign({}, c, { [field]: val }) : c));
   state.grades = Object.assign({}, state.grades, { [cid]: arr });
@@ -2473,6 +2683,7 @@ document.addEventListener('click', (e) => {
     }
     case 'open-add': {
       state.newA = blankNew();
+      state.formError = '';
       state.showAdd = true;
       render();
       break;
@@ -2481,6 +2692,7 @@ document.addEventListener('click', (e) => {
       state.newA = blankNew();
       state.newA.courseId = 'todo';
       state.newA.type = 'task';
+      state.formError = '';
       state.showAdd = true;
       render();
       break;
@@ -2488,6 +2700,7 @@ document.addEventListener('click', (e) => {
     case 'day-add': {
       state.newA = blankNew();
       state.newA.dueDate = el.dataset.date;
+      state.formError = '';
       state.showAdd = true;
       render();
       break;
@@ -2515,6 +2728,15 @@ document.addEventListener('click', (e) => {
       }
       break;
     }
+    case 'glance-open': {
+      const k = el.dataset.key;
+      state.glanceOpen = state.glanceOpen === k ? null : k;
+      const flip = captureSbFlip();
+      renderSidebar();
+      decorateA11y();
+      playSbFlip(flip);
+      break;
+    }
     case 'wallpaper': {
       state.wallpaper = el.dataset.w;
       render();
@@ -2538,6 +2760,14 @@ document.addEventListener('click', (e) => {
       arr.push({ id: 'g' + Date.now(), name: 'New category', weight: 0, score: '' });
       state.grades = Object.assign({}, state.grades, { [cid]: arr });
       render();
+      break;
+    }
+    case 'grade-list': {
+      const id = el.dataset.id;
+      state.gradeOpen = Object.assign({}, state.gradeOpen, { [id]: !state.gradeOpen[id] });
+      renderMain();
+      const inp = document.querySelector(`[data-input="grade-scores"][data-id="${id}"]`);
+      if (inp) inp.focus();
       break;
     }
     case 'grade-remove': {
@@ -2616,7 +2846,8 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'backup-export': {
-      saveTextAs(backupJSON(), 'semester-backup-' + fmt(TODAY) + '.json', 'Semester backup', 'json', 'application/json');
+      const label = String(termLabel()).replace(/[^\w-]+/g, '-').toLowerCase();
+      saveTextAs(backupJSON(), `semester-${label}-${fmt(TODAY)}.json`, 'Semester backup', 'json', 'application/json');
       break;
     }
     case 'new-semester': {
@@ -2673,14 +2904,22 @@ document.addEventListener('click', (e) => {
     }
     case 'save-add': {
       const n = state.newA;
-      if (!n.title.trim()) break;
+      if (!n.title.trim()) {
+        state.formError = 'Give it a title first.';
+        refreshModal();
+        const t = document.querySelector('[data-input="new-title"]');
+        if (t) t.focus();
+        break;
+      }
+      state.formError = '';
       const a = {
         id: 'm' + Date.now(),
         title: n.title.trim(),
         courseId: n.courseId,
         type: n.type,
         dueDate: n.dueDate || null,
-        dueTime: n.dueTime,
+        // blank time on a dated item = due end of day
+        dueTime: n.dueDate ? (n.dueTime || '23:59') : n.dueTime || undefined,
         difficulty: n.difficulty,
         status: 'todo',
         source: 'manual',
@@ -2695,15 +2934,17 @@ document.addEventListener('click', (e) => {
       render();
       break;
     }
+    // form controls redraw only the modal, keeping whatever field has focus —
+    // a full render() used to wipe half-typed dates out of the native picker
     case 'add-diff': {
       formTarget().difficulty = Number(el.dataset.n);
-      render();
+      refreshModal();
       break;
     }
     case 'add-repeats': {
       const ft = formTarget();
       ft.repeats = !ft.repeats;
-      render();
+      refreshModal();
       break;
     }
     case 'add-byday': {
@@ -2712,7 +2953,12 @@ document.addEventListener('click', (e) => {
       ft.byDay = (ft.byDay || []).includes(d)
         ? ft.byDay.filter((x) => x !== d)
         : (ft.byDay || []).concat([d]).sort();
-      render();
+      refreshModal();
+      break;
+    }
+    case 'add-date-quick': {
+      formTarget().dueDate = el.dataset.date;
+      refreshModal();
       break;
     }
     case 'close-detail': {
@@ -2732,6 +2978,7 @@ document.addEventListener('click', (e) => {
     case 'detail-edit': {
       const a = state.assignments.find((x) => x.id === el.dataset.base);
       if (!a) break;
+      state.formError = '';
       state.editA = {
         baseId: a.id,
         title: a.title,
@@ -2761,7 +3008,15 @@ document.addEventListener('click', (e) => {
     }
     case 'save-edit': {
       const n = state.editA;
-      if (!n || !n.title.trim()) break;
+      if (!n) break;
+      if (!n.title.trim()) {
+        state.formError = 'Give it a title first.';
+        refreshModal();
+        const t = document.querySelector('[data-input="new-title"]');
+        if (t) t.focus();
+        break;
+      }
+      state.formError = '';
       state.assignments = state.assignments.map((a) => {
         if (a.id !== n.baseId) return a;
         const upd = Object.assign({}, a, {
@@ -2769,7 +3024,7 @@ document.addEventListener('click', (e) => {
           courseId: n.courseId,
           type: n.type,
           dueDate: n.dueDate || null,
-          dueTime: n.dueTime,
+          dueTime: n.dueDate ? (n.dueTime || '23:59') : n.dueTime || undefined,
           difficulty: n.difficulty,
           notes: n.notes || '',
         });
@@ -2841,8 +3096,21 @@ document.addEventListener('input', (e) => {
       if (pv) pv.innerHTML = quickPreviewHTML(); // no full render: keep focus
       break;
     }
-    case 'new-title': formTarget().title = el.value; break;
+    case 'new-title': {
+      formTarget().title = el.value;
+      // clear the "needs a title" warning as soon as they start typing
+      if (state.formError && el.value.trim()) {
+        state.formError = '';
+        const box = document.querySelector('.form-error');
+        if (box) box.remove();
+      }
+      break;
+    }
     case 'new-notes': formTarget().notes = el.value; break;
+    // mirror date/time on `input` too, so a partially-typed value is never
+    // lost if something redraws the modal before `change` fires
+    case 'new-date': formTarget().dueDate = el.value; break;
+    case 'new-time': formTarget().dueTime = el.value; break;
     case 'course-name':
     case 'course-code': {
       const field = el.dataset.input === 'course-name' ? 'name' : 'code';
@@ -2863,10 +3131,27 @@ document.addEventListener('input', (e) => {
     case 'grade-score': {
       const cid = gradeCourseId();
       updateCat(cid, el.dataset.id, el.dataset.input === 'grade-weight' ? 'weight' : 'score', el.value);
-      const summary = $('#grade-summary');
-      if (summary) summary.innerHTML = gradeSummaryHTML(cid);
-      const targets = $('#grade-targets-wrap');
-      if (targets) targets.innerHTML = gradeTargetsHTML(cid);
+      refreshGradeTotals(cid);
+      saveState();
+      break;
+    }
+    case 'grade-scores': {
+      const cid = gradeCourseId();
+      const id = el.dataset.id;
+      updateCat(cid, id, 'scores', el.value);
+      // patch the derived % field and the meta line in place — re-rendering
+      // here would yank focus out of the list mid-typing
+      const cat = (state.grades[cid] || []).find((c) => c.id === id);
+      const avg = scoreAvg(parseScoreList(el.value));
+      const numEl = document.querySelector(`.gnum[data-input="grade-score"][data-id="${id}"]`);
+      if (numEl) {
+        numEl.classList.toggle('derived', avg !== null);
+        numEl.readOnly = avg !== null;
+        numEl.value = avg !== null ? Math.round(avg * 100) / 100 : (cat && cat.score) || '';
+      }
+      const metaEl = document.querySelector(`[data-meta="${id}"]`);
+      if (metaEl && cat) metaEl.textContent = scoreMetaText(cat);
+      refreshGradeTotals(cid);
       saveState();
       break;
     }
@@ -2964,6 +3249,7 @@ document.addEventListener('keydown', (e) => {
   if (cmd && !e.shiftKey && e.key.toLowerCase() === 'n') {
     e.preventDefault();
     state.newA = blankNew();
+    state.formError = '';
     state.showAdd = true;
     state.quickAdd = null;
     render();
@@ -3003,78 +3289,29 @@ document.addEventListener('keydown', (e) => {
   else if (e.key.toLowerCase() === 't') goToday();
 });
 
-// two-finger scroll drives the calendar track 1:1, then snaps to the nearest
-// month (vertical) / week (horizontal). Crossing a full panel commits it
-// immediately, so fast flings walk through several months/weeks fluidly.
-let snapDrag = 0, snapTimer = null;
+// a finger on the trackpad cancels any in-flight programmatic scroll, so
+// Today/arrow glides never fight the user
+document.addEventListener('wheel', () => {
+  if (scrollAnimId) cancelScrollAnim();
+}, { passive: true });
 
-document.addEventListener('wheel', (e) => {
-  if (state.view !== 'month') return; // week scrolls natively, no snap
-  if (anyModalOpen()) return;
-  if (!e.target.closest || !e.target.closest('#main')) return;
-  const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-  e.preventDefault();
-  onSnapWheel(delta);
-}, { passive: false });
-
-let snapD = 0;        // panel distance, measured once per gesture (avoids layout reads per event)
-let snapRaf = false;  // rAF batching: many wheel events per frame, one style write
-
-function onSnapWheel(delta) {
-  // new gesture: measure geometry and, if the settle animation is mid-flight,
-  // pick up from the track's current visual position instead of jumping
-  if (snapDrag === 0) {
-    snapD = panelDistance();
-    const tr = trackEl();
-    if (tr) {
-      const t = getComputedStyle(tr).transform;
-      if (t && t !== 'none') {
-        const m = new DOMMatrixReadOnly(t);
-        snapDrag = state.view === 'week' ? -m.m41 : -m.m42;
-      }
-    }
-  }
-  if (!snapD) return;
-
-  snapDrag += delta * 1.6; // gain: calendar moves a bit faster than the fingers
-  while (snapDrag >= snapD) { navCommit(1); snapDrag -= snapD; }
-  while (snapDrag <= -snapD) { navCommit(-1); snapDrag += snapD; }
-  applySnapDrag();
-  clearTimeout(snapTimer);
-  snapTimer = setTimeout(settleSnap, 100);
-}
-
-function applySnapDrag() {
-  if (snapRaf) return;
-  snapRaf = true;
+// month list: header follows the top week, one haptic tick per week crossed
+let monthTitleRaf = false;
+let monthTopWeek = null;
+let monthQuietUntil = 0; // programmatic scrolls don't ratchet
+document.addEventListener('scroll', (e) => {
+  if (state.view !== 'month' || e.target !== $('#main') || monthTitleRaf) return;
+  monthTitleRaf = true;
   requestAnimationFrame(() => {
-    snapRaf = false;
-    const tr = trackEl();
-    if (!tr) return;
-    tr.style.transition = 'none';
-    tr.style.transform = `translate${trackAxis()}(${-snapDrag}px)`;
+    monthTitleRaf = false;
+    const top = topMonthRow();
+    if (!top) return;
+    const wk = top.dataset.week;
+    if (monthTopWeek && monthTopWeek !== wk && Date.now() > monthQuietUntil) hapticTick('align');
+    monthTopWeek = wk;
+    syncMonthTitle();
   });
-}
-
-// gesture ended: snap to whichever panel is closest
-function settleSnap() {
-  const D = snapD || panelDistance();
-  if (!D) { snapDrag = 0; return; }
-  if (snapDrag >= D / 2) { navCommit(1); snapDrag -= D; }
-  else if (snapDrag <= -D / 2) { navCommit(-1); snapDrag += D; }
-
-  const tr = trackEl();
-  if (!tr) { snapDrag = 0; return; }
-  const axis = trackAxis();
-  const residual = snapDrag;
-  snapDrag = 0;
-  tr.style.transition = 'none';
-  tr.style.transform = `translate${axis}(${-residual}px)`;
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    tr.style.transition = 'transform .2s cubic-bezier(.22,.9,.3,1)';
-    tr.style.transform = `translate${axis}(0)`;
-  }));
-}
+}, true);
 
 // week list: keep the titlebar month in step with whatever day is on top,
 // and tick the trackpad each time the top row crosses onto a new day
@@ -3102,7 +3339,6 @@ document.addEventListener('scroll', (e) => {
 // haptic knock when a vertical scroll hits the top or bottom of the page
 let edgeLatchTop = false, edgeLatchBottom = false, edgeLastT = 0;
 document.addEventListener('wheel', (e) => {
-  if (state.view === 'month') return; // month flips instead of scrolling
   if (anyModalOpen()) return;
   if (!e.target.closest) return;
   const scroller = e.target.closest('.scrolly') || (e.target.closest('#main') && $('#main'));
