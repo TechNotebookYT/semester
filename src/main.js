@@ -196,7 +196,8 @@ const REDUCED_MOTION = window.matchMedia &&
 // exactly on the target, its duration scales with distance, and it can be
 // cancelled the instant the user touches the trackpad
 let scrollAnimId = 0;
-function cancelScrollAnim() { scrollAnimId++; }
+let scrollAnimActive = false; // true while a programmatic glide is running
+function cancelScrollAnim() { scrollAnimId++; scrollAnimActive = false; }
 function smoothScrollTo(el, top, done) {
   cancelScrollAnim();
   const max = el.scrollHeight - el.clientHeight;
@@ -211,14 +212,14 @@ function smoothScrollTo(el, top, done) {
   const dur = Math.min(760, 260 + Math.abs(delta) * 0.32);
   const t0 = performance.now();
   const mine = scrollAnimId;
-  el.classList.add('no-snap'); // CSS scroll-snap would fight a per-frame write
+  scrollAnimActive = true;
   const ease = (t) => 1 - Math.pow(1 - t, 3);
   const step = (now) => {
-    if (mine !== scrollAnimId) { el.classList.remove('no-snap'); return; }
+    if (mine !== scrollAnimId) return; // superseded or cancelled by the user
     const t = Math.min(1, (now - t0) / dur);
     el.scrollTop = start + delta * ease(t);
     if (t < 1) { requestAnimationFrame(step); return; }
-    el.classList.remove('no-snap');
+    scrollAnimActive = false;
     if (done) done();
   };
   requestAnimationFrame(step);
@@ -291,9 +292,14 @@ function sbKey(el) {
   if (inner) return 'in:' + inner.dataset.id;
   return el.className.split(' ')[0] + ':' + (el.textContent || '').trim().slice(0, 20);
 }
+// the scrolling half of the sidebar (the brand above it is pinned)
+function sbScroller() {
+  const sb = $('#sidebar');
+  return sb && sb.querySelector('.sb-scroll');
+}
 function captureSbFlip() {
   if (REDUCED_MOTION) return null;
-  const sb = $('#sidebar');
+  const sb = sbScroller();
   if (!sb) return null;
   const map = new Map();
   for (const el of sb.children) {
@@ -304,7 +310,7 @@ function captureSbFlip() {
 }
 function playSbFlip(map) {
   if (!map) return;
-  const sb = $('#sidebar');
+  const sb = sbScroller();
   if (!sb) return;
   const seen = new Set();
   for (const el of sb.children) {
@@ -570,9 +576,15 @@ function navCalendar(dir) {
 
 // trackpad haptic (macOS Force Touch) — silently a no-op outside Tauri
 // 'strong' = double level-change pulse (calendar flips), 'edge' = generic knock
+let lastHapticAt = 0;
 function hapticTick(kind = 'align') {
   const t = window.__TAURI__;
   if (!(t && t.core && t.core.invoke)) return;
+  // a fast wheel can cross a row every frame; throttle so we don't flood the
+  // IPC bridge (and so the ticks stay distinguishable)
+  const now = Date.now();
+  if (kind === 'align' && now - lastHapticAt < 70) return;
+  lastHapticAt = now;
   const send = (pattern) => t.core.invoke('haptic', { pattern }).catch(() => {});
   if (kind === 'strong') {
     send('strong');
@@ -796,7 +808,7 @@ function renderSidebar() {
     return `
       <button class="stat-tile ${key === 'overdue' && t.items.length ? 'alert' : ''} ${on ? 'open' : ''} ${empty ? 'empty' : ''}"
               data-act="glance-open" data-key="${key}" ${empty ? 'disabled' : ''}
-              aria-expanded="${on}" title="${empty ? 'Nothing ' + t.label.toLowerCase() : 'Show ' + t.label.toLowerCase()}">
+              aria-expanded="${on}" title="${empty ? 'Nothing ' + t.label.toLowerCase() : (on ? 'Hide' : 'Show') + ' these'}">
         <div class="stat-num" style="color:${empty ? 'var(--text-faint)' : t.color}">${t.items.length}</div>
         <div class="stat-label">${t.label}</div>
       </button>`;
@@ -839,16 +851,16 @@ function renderSidebar() {
     : `<div class="glance-clear">Nothing due this week 🎉</div>`;
 
   const sb = $('#sidebar');
-  const sbScroll = sb.scrollTop; // innerHTML swap must not nudge the panel's scroll
+  const prevScroll = sbScroller() ? sbScroller().scrollTop : 0; // survive the swap
   sb.innerHTML = `
-    <div class="sb-brand">
+    <div class="sb-brand" data-tauri-drag-region>
       <span class="sb-logo">S</span>
       <div>
         <div class="sb-title">Semester</div>
         <div class="sb-term">${termLabel()}</div>
       </div>
     </div>
-
+    <div class="sb-scroll">
     <div class="sb-head">Views</div>
     <button class="nav-btn ${state.view === 'grades' ? 'active' : ''}" data-act="view" data-view="grades">
       <span class="nav-icon">${icon('percent', 16)}</span> Grade Calculator
@@ -876,8 +888,9 @@ function renderSidebar() {
       <div class="sb-head">At a Glance</div>
       ${statHTML}
       ${sections.join('')}
+    </div>
     </div>`;
-  sb.scrollTop = sbScroll;
+  if (sbScroller()) sbScroller().scrollTop = prevScroll;
 }
 
 // open to-dos, occurrence-aware (recurring items check off per date),
@@ -1097,6 +1110,34 @@ function scrollMonth(dir) {
   const d = new Date(mid.getFullYear(), mid.getMonth() + dir, 1);
   positionMonth(d, true);
 }
+// Week snapping, in JS rather than CSS. Nothing resists the scroll while it's
+// happening (which is what made a mouse wheel fight the old mandatory snap);
+// once the wheel/fingers go quiet for a moment we glide to the nearest week.
+let monthSnapTimer = null;
+function scheduleMonthSnap() {
+  clearTimeout(monthSnapTimer);
+  monthSnapTimer = setTimeout(settleMonthSnap, 150);
+}
+function settleMonthSnap() {
+  if (state.view !== 'month' || scrollAnimActive || anyModalOpen() || dragOccId) return;
+  const main = $('#main');
+  const row = topMonthRow();
+  if (!main || !row) return;
+  const cur = main.scrollTop;
+  // nearest of the row crossing the top and the one after it
+  let best = monthRowTop(row);
+  const next = row.nextElementSibling;
+  if (next && next.dataset.week) {
+    const nt = monthRowTop(next);
+    if (Math.abs(nt - cur) < Math.abs(best - cur)) best = nt;
+  }
+  // already parked, or pinned at an end where snapping can't reach
+  if (Math.abs(best - cur) < 3) return;
+  if (cur <= 0 || cur >= main.scrollHeight - main.clientHeight - 1) return;
+  monthQuietUntil = Date.now() + 500; // the glide itself shouldn't ratchet
+  smoothScrollTo(main, best);
+}
+
 // header follows the month owning the top visible week
 function syncMonthTitle() {
   const top = topMonthRow();
@@ -3310,6 +3351,7 @@ document.addEventListener('scroll', (e) => {
     if (monthTopWeek && monthTopWeek !== wk && Date.now() > monthQuietUntil) hapticTick('align');
     monthTopWeek = wk;
     syncMonthTitle();
+    if (!scrollAnimActive) scheduleMonthSnap(); // settle on a week once it stops
   });
 }, true);
 

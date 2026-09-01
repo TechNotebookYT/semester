@@ -5,6 +5,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; }
 
 /* type scale — 5 tokens; 11px is the readability floor */
 :root {
+  --sb-w: 264px;   /* sidebar width */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-base: 13px;
@@ -99,22 +100,24 @@ input, select, textarea, button { font-family: inherit; }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 
 /* ============ App frame ============ */
+/* sidebar runs the full height at the left; the titlebar sits in the content
+   column to its right (macOS Mail/Notes layout) */
 .app {
   position: fixed; inset: 0;
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: row;
   background: var(--win);
   backdrop-filter: blur(50px) saturate(180%);
   -webkit-backdrop-filter: blur(50px) saturate(180%);
 }
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 /* ============ Title bar ============ */
 .titlebar {
   height: 54px; flex: none;
   display: flex; align-items: center; gap: 16px;
-  padding: 0 18px 0 0;
+  padding: 0 18px;
   border-bottom: 1px solid var(--sep);
 }
-.traffic-space { width: 86px; height: 100%; flex: none; }
 .tb-spacer { flex: 1; height: 100%; }
 
 .seg {
@@ -191,18 +194,29 @@ input, select, textarea, button { font-family: inherit; }
   box-shadow: 0 4px 14px rgba(10,132,255,.35);
 }
 
-/* ============ Body / sidebar ============ */
-.body { flex: 1; display: flex; min-height: 0; }
-
+/* ============ Sidebar ============ */
+/* One uniform pane: the brand is pinned (it holds the traffic-light
+   clearance) and only .sb-scroll moves, so there's no overlay mask and
+   therefore no seam where two blurred layers would meet. */
 .sidebar {
-  width: 264px; flex: none;
+  width: var(--sb-w); flex: none; height: 100%;
   border-right: 1px solid var(--sep);
   background: var(--sidebar);
   backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
   display: flex; flex-direction: column;
-  padding: 16px 12px; overflow: auto;
+  padding: 0; overflow: hidden;
 }
-.sb-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; }
+/* --tl-clear: vertical room the OS traffic lights need. Tune here only. */
+.sb-brand {
+  --tl-clear: 32px;
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: var(--tl-clear) 20px 10px;
+}
+.sb-scroll {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  padding: 0 12px 16px; overflow-y: auto; overflow-x: hidden;
+}
 .sb-logo {
   width: 30px; height: 30px; border-radius: 9px;
   background: linear-gradient(160deg, #0a84ff, #a855f7);
@@ -328,7 +342,9 @@ input, select, textarea, button { font-family: inherit; }
 }
 .glance-clear { font-size: var(--fs-sm); color: var(--text-dim); padding: 4px 8px 2px; }
 .glance-card + .glance-card { margin-top: 5px; }
-.glance-card .gc-body { flex: 1; min-width: 0; }
+/* min-width:0 is what lets the nowrap title actually ellipsize instead of
+   forcing the row wider than the sidebar */
+.glance-card .gc-body, .glance-item .gc-body { flex: 1; min-width: 0; }
 .gc-title { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gc-title.sm { font-size: var(--fs-sm); }
 .gc-meta { font-size: var(--fs-xs); color: var(--text-dim); }
@@ -350,8 +366,11 @@ input, select, textarea, button { font-family: inherit; }
   position: sticky; top: 0; z-index: 3; height: 44px;
   display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; align-items: center;
   margin: 0 -22px; padding: 0 22px;
-  background: var(--win);
-  backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%);
+  /* .app already paints the window with --win, so a second full coat here
+     reads as a separate gray band; a light veil + blur keeps this bar the
+     same material as the titlebar and sidebar it sits between */
+  background: color-mix(in srgb, var(--win) 55%, transparent);
+  backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%);
   border-bottom: 1px solid var(--sep-2);
 }
 .month-head {
@@ -362,7 +381,6 @@ input, select, textarea, button { font-family: inherit; }
 .month-row {
   display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px;
   height: clamp(100px, calc((100vh - 150px) / 5), 200px);
-  scroll-snap-align: start;
 }
 /* the week a month begins in gets breathing room + a rule above it */
 .month-row.mo-break { margin-top: 14px; position: relative; }
@@ -370,9 +388,10 @@ input, select, textarea, button { font-family: inherit; }
   content: ''; position: absolute; left: 0; right: 0; top: -8px;
   height: 1px; background: var(--sep);
 }
-/* week snapping, applied only while the month view is up */
-.main.snap-weeks { scroll-snap-type: y mandatory; scroll-padding-top: 44px; }
-.main.no-snap { scroll-snap-type: none; }
+/* Week snapping is done in JS (settleMonthSnap), NOT via scroll-snap-type:
+   CSS mandatory snap fights a mouse wheel — a notch that moves less than half
+   a row gets yanked back, so the calendar refuses to advance or judders. */
+.main.snap-weeks { scroll-padding-top: 44px; }
 
 .mday {
   border-radius: 12px; padding: 6px; overflow: hidden;
@@ -1208,7 +1227,7 @@ button:active { transform: scale(.95); }
 .stat-tile.open { border-color: var(--accent); background: var(--today); }
 .stat-tile.empty, .stat-tile:disabled { cursor: default; opacity: .8; }
 .glance-expand {
-  display: flex; flex-direction: column; gap: 5px;
+  display: flex; flex-direction: column; gap: 5px; min-width: 0;
   margin: 8px 4px 0; padding: 8px;
   background: var(--glass-2); border: 1px solid var(--sep-2); border-radius: 11px;
   animation: fadein .22s ease;
@@ -1216,7 +1235,9 @@ button:active { transform: scale(.95); }
 .glance-item {
   cursor: pointer; display: flex; align-items: center; gap: 8px;
   padding: 6px 8px; border-radius: 8px; background: var(--chip);
+  min-width: 0; overflow: hidden;
 }
+.glance-item .gc-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .glance-item:hover { background: var(--glass); }
 .glance-item .gi-check { width: 15px; height: 15px; border-radius: 5px; }
 .glance-more { font-size: var(--fs-xs); color: var(--text-faint); padding: 2px 8px; }

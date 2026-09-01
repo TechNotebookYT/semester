@@ -9,9 +9,12 @@
   </head>
   <body>
     <div class="app">
-      <header class="titlebar" data-tauri-drag-region>
-        <div class="traffic-space" data-tauri-drag-region></div>
+      <!-- full-height sidebar: the traffic lights sit over its top strip
+           (masked by .app::before), so the titlebar starts after it -->
+      <aside class="sidebar" id="sidebar" data-tauri-drag-region></aside>
 
+      <div class="content">
+      <header class="titlebar" data-tauri-drag-region>
         <div class="seg">
           <span class="seg-thumb" id="seg-thumb"></span>
           <button class="seg-btn" id="seg-month" data-act="view" data-view="month">Month</button>
@@ -48,8 +51,6 @@
         </button>
       </header>
 
-      <div class="body">
-        <aside class="sidebar" id="sidebar"></aside>
         <main class="main" id="main"></main>
       </div>
     </div>
