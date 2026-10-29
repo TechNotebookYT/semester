@@ -50,7 +50,7 @@ input, textarea { user-select: text; cursor: text; }
 }
 [data-theme="dark"] {
   color-scheme: dark;
-  --wall: linear-gradient(180deg, #202124 0%, #17181a 100%);
+  --wall: linear-gradient(135deg, #25283b 0%, #252336 50%, #1a1c26 100%);
   --win: rgba(30,30,36,0.62);
   --glass: rgba(58,58,66,0.5);
   --glass-2: rgba(70,70,80,0.32);
