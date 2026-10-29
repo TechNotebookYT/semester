@@ -39,7 +39,7 @@ Dropping in a syllabus and reviewing what was parsed before it's added:
 - **Syllabus import.** Copy the built-in prompt into any LLM along with a course syllabus; it returns a JSON file you drop into the app. Assignments, recurring items, TBD dates, and the grading breakdown all import in one shot, with a review step before anything is added.
 - **Grade calculator.** Per-course weighted categories (auto-filled from the imported syllabus); enter scores as they come to see your current grade and letter.
 - **To-Dos.** Personal tasks alongside coursework, shown in pink on the calendar, with their own page (Overdue / Today / Upcoming) and the top two pinned in the sidebar.
-- **Animations** Fluid animations throughout the app. Checking off items, transitioning between pages, etc.
+- **Motion and haptics.** Short, gently settling page and dialog transitions; animated list changes and grade disclosures; drawn checkmarks with immediate task saving. Native Force Touch feedback for selections, completion, saves, undo, and validation. Respects macOS Reduce Motion, including changes while running. Calendar day/week haptic ticks retain their original behavior.
 - **Due-soon notifications.** Anything unchecked and due within 3 hours triggers a macOS notification (while the app is open).
 - **Course editor.** Rename, recolor, or bulk-edit any course's raw JSON; two-step delete.
 - **Extras.** "Needs a Date" inbox for TBD items, Completed history, `.ics` export to Apple Calendar, light/dark liquid-glass themes, and everything stored locally.
@@ -52,6 +52,7 @@ Prereqs: Rust toolchain + Node (see [Tauri prerequisites](https://tauri.app/star
 npm install
 npm run tauri dev     # run the app
 npm run tauri build   # build Semester.app / dmg
+npm test             # completion, reduced-motion, and haptic regression checks
 ```
 
 Frontend lives in `src/` (plain HTML/CSS/JS, served as static files); the Rust shell in `src-tauri/`. There is no frontend build step.

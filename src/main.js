@@ -46,11 +46,8 @@ let state = {
   formError: '',
   glanceOpen: null,      // which At-a-Glance tile is expanded
   gradeOpen: {},         // grade categories showing their score list
-  wallpaper: 'colorful', // 'colorful' | 'subtle' — neutral glass for long sessions
+  wallpaper: 'colorful', // legacy storage keys: 'colorful' = Soft, 'subtle' = Flat
 };
-
-// occurrence id that just got completed — its reborn element pops in on the next render
-let completedPopId = null;
 
 function loadState() {
   try {
@@ -188,8 +185,80 @@ function icon(name, size = 18, sw = 1.8) {
   return `<svg class="icn" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
 
-const REDUCED_MOTION = window.matchMedia &&
-  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+let REDUCED_MOTION = motionPreference.matches;
+motionPreference.addEventListener('change', (event) => {
+  REDUCED_MOTION = event.matches;
+  if (REDUCED_MOTION) {
+    cancelScrollAnim();
+    for (const animation of document.getAnimations()) animation.finish();
+    for (const id of completionHolds.keys()) finishCompletionHold(id);
+  }
+});
+
+// A shared, gently decelerating motion vocabulary. Only animate visible content;
+// long calendars should never animate hundreds of offscreen rows.
+const MOTION = { ease: 'cubic-bezier(.22,1,.36,1)', duration: 280 };
+function motion(el, frames, options = {}) {
+  if (!el || !el.animate || REDUCED_MOTION) return null;
+  return el.animate(frames, { duration: MOTION.duration, easing: MOTION.ease, ...options });
+}
+function visibleIn(el, container = $('#main')) {
+  const r = el.getBoundingClientRect();
+  const bounds = (container.querySelector('.overlay') || container).getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && r.bottom > bounds.top && r.top < bounds.bottom &&
+    r.right > bounds.left && r.left < bounds.right;
+}
+function enterContent(root, direction = 0) {
+  if (!root || REDUCED_MOTION) return;
+  motion(root, [
+    // Full-width view roots must stay inside the horizontal scroll bounds.
+    // A small vertical entrance keeps both card edges visible during navigation.
+    { opacity: 0, transform: `translateY(${direction ? direction * 8 : 6}px)` },
+    { opacity: 1, transform: 'none' },
+  ]);
+  // Restrained grouping, with a bounded 75ms cascade across the visible page.
+  const groups = [...root.querySelectorAll('.agenda-group, .todos-section, .course-card, .needs-card, .grade-summary, .grade-rows, .done-list, .prompt-box, .dropzone, .review-list, .side-card')]
+    .filter(el => visibleIn(el)).slice(0, 6);
+  groups.forEach((el, i) => motion(el, [
+    { opacity: 0, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' },
+  ], { delay: i * 15, fill: 'backwards' }));
+}
+
+// Stable keys let disclosures, filters and editable lists keep their spatial
+// continuity even though their templates are replaced on each render.
+const LAYOUT_ITEMS = '.grade-row-wrap, .grade-summary, #grade-targets-wrap, .btn-add-cat, .needs-card, .course-card, .done-row, .review-item';
+function layoutKey(el) {
+  const control = el.querySelector('[data-id], [data-i]');
+  return el.classList[0] + ':' + (el.id || el.dataset.id || el.dataset.motionKey ||
+    (control && (control.dataset.id || control.dataset.i)) || '');
+}
+function captureLayout(root) {
+  const map = new Map();
+  if (!root || REDUCED_MOTION) return map;
+  for (const el of root.querySelectorAll(LAYOUT_ITEMS)) {
+    if (visibleIn(el, root)) map.set(layoutKey(el), el.getBoundingClientRect());
+  }
+  return map;
+}
+function settleLayout(root, before) {
+  if (!root || REDUCED_MOTION) return;
+  for (const el of root.querySelectorAll(LAYOUT_ITEMS)) {
+    if (!visibleIn(el, root)) continue;
+    const old = before.get(layoutKey(el));
+    const rect = el.getBoundingClientRect();
+    if (!old) {
+      motion(el, [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }]);
+      continue;
+    }
+    if (Math.abs(old.top - rect.top) > 1) {
+      motion(el, [{ transform: `translateY(${old.top - rect.top}px)` }, { transform: 'none' }]);
+    }
+    if (el.matches('.grade-row-wrap') && Math.abs(old.height - rect.height) > 1) {
+      motion(el.querySelector('.grade-sub'), [{ opacity: 0, transform: 'translateY(-4px)' }, { opacity: 1, transform: 'none' }]);
+    }
+  }
+}
 
 // ---------- smooth scrolling ----------
 // hand-rolled easing instead of scrollTo({behavior:'smooth'}): it lands
@@ -247,7 +316,7 @@ function captureFlip() {
   }
   return map;
 }
-function playFlip(map, excludeId) {
+function playFlip(map, excludeId, duration = MOTION.duration) {
   if (!map) return;
   const main = $('#main');
   if (!main) return;
@@ -263,7 +332,7 @@ function playFlip(map, excludeId) {
     if (Math.abs(dy) < 1) continue;
     movedRows.add(row);
     row.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }],
-      { duration: 320, easing: 'cubic-bezier(.3,.9,.4,1)' });
+      { duration, easing: MOTION.ease });
   }
   for (const el of main.querySelectorAll('[data-id]')) {
     const id = el.dataset.id;
@@ -278,7 +347,7 @@ function playFlip(map, excludeId) {
     const dx = r0.left - r1.left, dy = r0.top - r1.top;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
     el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-      { duration: 320, easing: 'cubic-bezier(.3,.9,.4,1)' });
+      { duration, easing: MOTION.ease });
   }
 }
 
@@ -302,18 +371,20 @@ function captureSbFlip() {
   const sb = sbScroller();
   if (!sb) return null;
   const map = new Map();
-  for (const el of sb.children) {
+  for (const el of sb.querySelectorAll(':scope > *, .glance > *')) {
     const k = sbKey(el);
     if (!map.has(k)) map.set(k, el.getBoundingClientRect());
   }
   return map;
 }
-function playSbFlip(map) {
+function playSbFlip(map, duration = MOTION.duration) {
   if (!map) return;
   const sb = sbScroller();
   if (!sb) return;
   const seen = new Set();
-  for (const el of sb.children) {
+  const moved = new Set();
+  for (const el of sb.querySelectorAll(':scope > *, .glance > *')) {
+    if (moved.has(el.parentElement)) continue;
     const k = sbKey(el);
     if (seen.has(k)) continue;
     seen.add(k);
@@ -321,8 +392,9 @@ function playSbFlip(map) {
     if (!r0 || !el.animate) continue;
     const dy = r0.top - el.getBoundingClientRect().top;
     if (Math.abs(dy) < 1) continue;
+    moved.add(el);
     el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }],
-      { duration: 300, easing: 'cubic-bezier(.3,.9,.4,1)' });
+      { duration, easing: MOTION.ease });
   }
 }
 
@@ -342,6 +414,7 @@ function decorateA11y() {
   for (const el of document.querySelectorAll('.legend-check')) {
     if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
   }
+  decorateCompletionHolds();
 }
 
 function dotsHTML(n, px = 7, cls = '') {
@@ -380,6 +453,42 @@ function recurLabel(rec) {
   return days.length ? freq + ' · ' + days.map((d) => DAY_ABBR[d]).join('/') : freq;
 }
 
+// Fields that may differ for one occurrence without breaking its parent loop.
+// Per-date patches are intentionally sparse: changing the series later still
+// flows through to every field that was not customized on that occurrence.
+const OCCURRENCE_FIELDS = ['title', 'courseId', 'type', 'dueDate', 'dueTime', 'difficulty', 'notes'];
+function assignmentValues(n) {
+  return {
+    title: n.title.trim(),
+    courseId: n.courseId,
+    type: n.type,
+    dueDate: n.dueDate || null,
+    dueTime: n.dueDate ? (n.dueTime || '23:59') : n.dueTime || undefined,
+    difficulty: n.difficulty,
+    notes: n.notes || '',
+  };
+}
+function occurrencePatch(base, n, occurrenceDate) {
+  const values = assignmentValues(n);
+  const patch = {};
+  for (const field of OCCURRENCE_FIELDS) {
+    const inherited = field === 'dueDate' ? occurrenceDate : base[field];
+    if (values[field] !== inherited) patch[field] = values[field];
+  }
+  return patch;
+}
+function previousDate(ds) {
+  const d = parseDate(ds);
+  d.setDate(d.getDate() - 1);
+  return fmt(d);
+}
+function datesBefore(map, splitDate) {
+  return Object.fromEntries(Object.entries(map || {}).filter(([date]) => date < splitDate));
+}
+function datesFrom(map, splitDate) {
+  return Object.fromEntries(Object.entries(map || {}).filter(([date]) => date >= splitDate));
+}
+
 // expand recurrences into dated occurrences, minus hidden courses
 // (pass includeHidden=true for exports that should cover everything)
 function occurrences(includeHidden) {
@@ -395,10 +504,14 @@ function occurrences(includeHidden) {
       const push = (ds) => {
         // a single occurrence deleted from the series is recorded in exDates
         if (a.exDates && a.exDates[ds]) return;
-        out.push(Object.assign({}, a, {
-          dueDate: ds,
+        const override = (a.occurrenceOverrides && a.occurrenceOverrides[ds]) || {};
+        out.push(Object.assign({}, a, override, {
+          // Keep the generated date separate when this occurrence was moved.
+          // Its stable id and completion state remain tied to the original slot.
+          dueDate: override.dueDate || ds,
           _recurring: true,
           _baseId: a.id,
+          _occurrenceDate: ds,
           id: a.id + '@' + ds,
           // recurring occurrences are completed per-date, not on the base item
           status: a.doneDates && a.doneDates[ds] ? 'done' : 'todo',
@@ -436,92 +549,146 @@ function occurrences(includeHidden) {
   return out.filter((o) => includeHidden || !state.hidden[o.courseId]);
 }
 
-// the completion celebration: checkbox flares and fills, the title gets
-// struck through stroke-by-stroke, the card's outline glows in the course
-// color, then the card morphs — shrinks and glides — into its "done" incarnation
-function playCompleteAnim(checkEl) {
-  if (checkEl.classList.contains('checking')) return; // already mid-celebration
-  const occId = checkEl.dataset.id;
-  const baseId = checkEl.dataset.base;
-  if (REDUCED_MOTION) { toggleDone(occId, baseId); return; }
-  const card = checkEl.closest('.wcard, .acard, .todo-row, .ctask-row, .glance-item');
+// Save completion immediately, but keep the task in its original layout while
+// the check and strike draw. Exports, notifications and Completed use real data.
+const completionHolds = new Map();
+const COMPLETION_HOLD_MS = 1050;
+const CHECK_MARK = '<svg class="completion-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8 3 3 6-6" /></svg>';
+function presentationAssignment(a) {
+  return completionHolds.has(a.id) && a.status === 'done' ? { ...a, status: 'todo' } : a;
+}
+function visibleOccurrences() {
+  return occurrences().map(presentationAssignment);
+}
 
-  checkEl.classList.add('checking');
-  hapticTick('align');
-
-  // sidebar to-do rows have no on-screen "done" incarnation to morph into (they
-  // just leave the list), and the wide glow/scale looks wrong in the narrow
-  // panel — check, then collapse the row in place rather than fly a ghost across
-  // the app to wherever the done copy happens to render
-  if (card && checkEl.closest('#sidebar')) {
-    setTimeout(() => card.classList.add('row-collapse'), 340);
-    setTimeout(() => { toggleDone(occId, baseId); hapticTick('edge'); }, 660);
-    return;
-  }
-
-  if (card) {
-    card.classList.add('completing');
+function decorateCompletionHolds() {
+  for (const check of document.querySelectorAll('[data-act="toggle-done"]')) {
+    const hold = completionHolds.get(check.dataset.id);
+    if (!hold) continue;
+    const card = check.closest('.wcard, .acard, .todo-row, .ctask-row, .glance-item');
+    if (!card || card.classList.contains('completion-hold')) continue;
+    card.classList.add('completion-hold');
+    // Sidebar rows and cards that move into another section gently dissolve
+    // only after the strike has finished. Agenda cards remain in place.
+    if (check.closest('#sidebar') || ['week', 'todos', 'courses'].includes(state.view)) {
+      card.classList.add('completion-hold-leaving');
+    }
+    card.style.setProperty('--completion-elapsed', `${-(performance.now() - hold.started)}ms`);
+    check.dataset.done = '1';
+    check.setAttribute('aria-checked', 'true');
+    check.setAttribute('aria-label', 'Mark as to-do');
+    check.classList.add('checking');
+    check.innerHTML = CHECK_MARK;
     const title = card.querySelector('.wcard-title, .acard-title, .todo-title, .ctask-title, .gc-title');
-    if (title) setTimeout(() => title.classList.add('strike-anim'), 120);
+    title?.classList.add('strike-anim');
   }
-
-  setTimeout(() => {
-    const from = card && card.getBoundingClientRect();
-    const ghost = card ? morphGhost(card, from) : null;
-    completedPopId = occId;
-    toggleDone(occId, baseId); // re-renders; morphToDone hands off to the new element
-    completedPopId = null;
-    hapticTick('edge'); // soft thud as it lands in the pill
-    morphToDone(ghost, from, occId);
-  }, card ? 620 : 350);
 }
 
-// fixed-position clone of the card, frozen mid-celebration, used as the
-// morph's outgoing half (the live card is destroyed by the re-render)
-function morphGhost(card, r) {
-  const g = card.cloneNode(true);
-  g.classList.remove('completing');
-  // freeze cloned check/strike animations at their end state instead of replaying
-  for (const n of g.querySelectorAll('*')) { n.style.animationDuration = '0s'; n.style.transition = 'none'; }
-  g.style.cssText += `;position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;margin:0;z-index:60;pointer-events:none;transform-origin:top left;`;
-  document.body.appendChild(g);
-  return g;
-}
-
-// FLIP crossfade: the ghost of the big card shrinks/glides into the done
-// element's box while the done element grows out of the card's box
-function morphToDone(ghost, from, occId) {
-  if (!ghost) return;
-  const sel = `.done-chip[data-id="${occId}"], .acard[data-id="${occId}"], .todo-row[data-id="${occId}"], .wcard[data-id="${occId}"]`;
-  const target = document.querySelector(sel);
-  if (!target || !ghost.animate) {
-    // done incarnation isn't on screen (e.g. sidebar to-do) — just shrink away
-    if (ghost.animate) {
-      ghost.animate(
-        [{ transform: 'none', opacity: 1 }, { transform: 'scale(.6)', opacity: 0 }],
-        { duration: 280, easing: 'ease-in' }
-      ).onfinish = () => ghost.remove();
-    } else ghost.remove();
-    return;
+// Completion commits immediately. Finishing the visual only releases its
+// layout hold; it never toggles data or changes the user's current view.
+const completingIds = new Set();
+function playCompleteAnim(checkEl) {
+  const occId = checkEl.dataset.id;
+  if (completingIds.has(occId)) return;
+  const baseId = checkEl.dataset.base;
+  const card = checkEl.closest('.wcard, .acard, .todo-row, .ctask-row, .glance-item');
+  const checkRect = checkEl.getBoundingClientRect?.();
+  const color = card ? getComputedStyle(card).getPropertyValue('--cc') || 'var(--accent)' : '#34c759';
+  completingIds.add(occId);
+  if (!REDUCED_MOTION && card) completionHolds.set(occId, { started: performance.now() });
+  toggleDone(occId, baseId);
+  hapticFeedback('success');
+  if (!REDUCED_MOTION && checkRect) {
+    completionBurst(checkRect, color);
+    flyCheckToCompleted(checkRect, color);
   }
-  target.classList.remove('pill-pop'); // the morph replaces the fallback pop
-  const to = target.getBoundingClientRect();
-  const ease = 'cubic-bezier(.3,1.15,.4,1)';
-  ghost.animate(
-    [
-      { transform: 'none', opacity: 1 },
-      { transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`, opacity: 0 },
-    ],
-    { duration: 440, easing: ease }
-  ).onfinish = () => ghost.remove();
-  target.animate(
-    [
-      { transformOrigin: 'top left', transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`, opacity: 0 },
-      { transformOrigin: 'top left', transform: 'none', opacity: 1 },
-    ],
-    { duration: 440, easing: ease }
-  );
+  if (!card) {
+    document.querySelector('.detail-title.done')?.classList.add('strike-anim');
+  }
+  if (completionHolds.has(occId)) {
+    setTimeout(() => finishCompletionHold(occId), COMPLETION_HOLD_MS);
+  }
+  setTimeout(() => completingIds.delete(occId), REDUCED_MOTION ? 0 : COMPLETION_HOLD_MS + 100);
 }
+
+function finishCompletionHold(id) {
+  if (!completionHolds.delete(id)) return;
+  const flip = captureFlip(), sidebarFlip = captureSbFlip();
+  render();
+  playFlip(flip, id, 650);
+  playSbFlip(sidebarFlip, 650);
+}
+
+// Keep the local celebration alongside the flying duplicate. Rendering into
+// the body lets the halo and particles extend beyond card and sidebar edges.
+function completionBurst(rect, color) {
+  const burst = document.createElement('div');
+  burst.className = 'completion-burst';
+  burst.setAttribute('aria-hidden', 'true');
+  burst.style.cssText = `left:${rect.left + rect.width / 2}px;top:${rect.top + rect.height / 2}px;--burst-color:${color};`;
+  burst.innerHTML = '<span class="completion-halo"></span>' + Array.from({ length: 10 }, (_, i) => {
+    const angle = i / 10 * Math.PI * 2;
+    const distance = i % 2 ? 28 : 42;
+    return `<i style="--dx:${Math.cos(angle) * distance}px;--dy:${Math.sin(angle) * distance}px;--turn:${i * 47}deg;--delay:${i % 3 * 25}ms"></i>`;
+  }).join('');
+  document.body.appendChild(burst);
+  setTimeout(() => burst.remove(), 1600);
+}
+
+// A true circular arc with a shallow bow. Try either side of the chord and
+// reduce the bow near window edges so the check stays inside the viewport.
+function completionArc(start, end, bounds) {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const chord = Math.hypot(dx, dy);
+  if (chord < 1) return Array.from({ length: 49 }, () => ({ ...end }));
+  for (const bow of [.22, .12, .05, .01]) {
+    for (const side of [1, -1]) {
+      const h = chord * bow;
+      const radius = chord * chord / (8 * h) + h / 2;
+      const nx = -dy / chord * side, ny = dx / chord * side;
+      const cx = (start.x + end.x) / 2 - nx * (radius - h);
+      const cy = (start.y + end.y) / 2 - ny * (radius - h);
+      const a0 = Math.atan2(start.y - cy, start.x - cx);
+      const sweep = 2 * Math.asin(Math.min(1, chord / (2 * radius))) * -side;
+      const points = Array.from({ length: 49 }, (_, i) => {
+        const angle = a0 + sweep * i / 48;
+        return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+      });
+      if (points.every(p => p.x >= 12 && p.x <= bounds.width - 12 && p.y >= 12 && p.y <= bounds.height - 12)) return points;
+    }
+  }
+  return Array.from({ length: 49 }, (_, i) => ({ x: start.x + dx * i / 48, y: start.y + dy * i / 48 }));
+}
+
+function flyCheckToCompleted(rect, color) {
+  const tab = $('#seg-done');
+  if (!tab || REDUCED_MOTION) return;
+  const destination = tab.querySelector('.completed-tab-check') || tab;
+  const to = destination.getBoundingClientRect();
+  const start = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  const end = { x: to.left + to.width / 2, y: to.top + to.height / 2 };
+  const points = completionArc(start, end, { width: window.innerWidth, height: window.innerHeight });
+  const flyer = document.createElement('span');
+  flyer.className = 'completion-flyer';
+  flyer.setAttribute('aria-hidden', 'true');
+  flyer.style.setProperty('--cc', color);
+  flyer.innerHTML = CHECK_MARK;
+  document.body.appendChild(flyer);
+  const animation = motion(flyer, points.map((p, i) => {
+    const t = i / (points.length - 1);
+    return { transform: `translate(${p.x - 12}px, ${p.y - 12}px) scale(${1 - .5 * t}) rotate(${-10 * Math.sin(t * Math.PI)}deg)`, opacity: t > .9 ? (1 - t) / .1 : 1 };
+  }), { duration: 1400, delay: 250, easing: 'cubic-bezier(.42,0,.2,1)', fill: 'both' });
+  if (!animation) { flyer.remove(); return; }
+  animation.finished.then(() => {
+    if (!REDUCED_MOTION && tab.isConnected) motion(tab, [
+      { boxShadow: 'inset 0 0 0 1px rgba(52,199,89,0), 0 0 18px rgba(52,199,89,0)' },
+      { boxShadow: 'inset 0 0 0 1px rgba(52,199,89,.65), 0 0 18px rgba(52,199,89,.3)', offset: .25 },
+      { boxShadow: 'inset 0 0 0 1px rgba(52,199,89,.5), 0 0 18px rgba(52,199,89,.22)', offset: .55 },
+      { boxShadow: 'inset 0 0 0 1px rgba(52,199,89,0), 0 0 18px rgba(52,199,89,0)' },
+    ], { duration: 1800, easing: 'ease-in-out' });
+  }).catch(() => {}).finally(() => flyer.remove());
+}
+
 
 // the course editor shows a raw JSON mirror of its assignments; when they
 // change through modals/checks while it's open, rebuild it so a later
@@ -535,6 +702,8 @@ function refreshCourseJson() {
 function toggleDone(occId, baseId) {
   const flip = captureFlip();
   const sbFlip = captureSbFlip();
+  const focused = document.activeElement;
+  const focusScope = focused?.dataset.id === occId && focused.closest('#sidebar, #main, #modal-root');
   const base = baseId || occId;
   const now = new Date().toISOString();
   if (occId && occId.includes('@')) {
@@ -556,9 +725,13 @@ function toggleDone(occId, baseId) {
   }
   refreshCourseJson();
   render();
-  // the celebrating card has its own morph; everything else glides
-  playFlip(flip, completedPopId);
+  playFlip(flip, occId);
   playSbFlip(sbFlip);
+  if (focusScope) {
+    const checks = [...focusScope.querySelectorAll('[data-act="toggle-done"], [data-act="detail-toggle-done"]')];
+    const next = checks.find(el => el.dataset.id === occId) || checks.find(el => el.dataset.done !== '1');
+    next?.focus({ preventScroll: true });
+  }
 }
 
 // ---------- calendar navigation ----------
@@ -594,6 +767,20 @@ function hapticTick(kind = 'align') {
   }
 }
 
+// Discrete action feedback has its own limiter: it must not change the timing
+// or pattern of the calendar's existing day/week ratchets and edge clicks.
+let lastActionHapticAt = -Infinity;
+function hapticFeedback(kind = 'selection') {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) return;
+  const now = performance.now();
+  if (now - lastActionHapticAt < 90) return;
+  lastActionHapticAt = now;
+  const pattern = { selection: 'align', success: 'strong', warning: 'generic' }[kind] || 'align';
+  // macOS supplies the waveform; a single native pulse is sufficient.
+  invoke('haptic', { pattern }).catch(() => {});
+}
+
 // dock badge: how many unchecked items are due today (macOS)
 function updateBadge() {
   try {
@@ -620,12 +807,12 @@ function render() {
 }
 
 function renderTitlebar() {
-  for (const v of ['month', 'week', 'agenda']) {
+  for (const v of ['month', 'week', 'agenda', 'done']) {
     $('#seg-' + v).classList.toggle('active', state.view === v);
   }
   // glide the glass thumb under the active segment
   const thumb = $('#seg-thumb');
-  const activeSeg = ['month', 'week', 'agenda'].includes(state.view) ? $('#seg-' + state.view) : null;
+  const activeSeg = ['month', 'week', 'agenda', 'done'].includes(state.view) ? $('#seg-' + state.view) : null;
   if (activeSeg) {
     thumb.style.transform = `translateX(${activeSeg.offsetLeft}px)`;
     thumb.style.width = activeSeg.offsetWidth + 'px';
@@ -663,7 +850,7 @@ function renderTitlebar() {
 }
 
 function renderSidebar() {
-  const occ = occurrences();
+  const occ = visibleOccurrences();
   const todayStr = fmt(TODAY);
   const in7 = new Date(TODAY); in7.setDate(TODAY.getDate() + 7);
   const in7Str = fmt(in7);
@@ -830,7 +1017,7 @@ function renderSidebar() {
           ? (o.dueTime ? timeLabel(o.dueTime) : 'All day')
           : monthName(dt.getMonth()).slice(0, 3) + ' ' + dt.getDate();
         return `
-          <div class="glance-item" data-act="detail" data-id="${o.id}" style="border-left:3px solid ${c.color}">
+          <div class="glance-item" data-act="detail" data-id="${o.id}" style="--cc:${c.color};border-left:3px solid ${c.color}">
             <span class="check gi-check" data-act="toggle-done" data-done="0" data-id="${o.id}" data-base="${o._baseId || o.id}"></span>
             <div class="gc-body">
               <div class="gc-title">${esc(o.title)}</div>
@@ -891,13 +1078,19 @@ function renderSidebar() {
     </div>
     </div>`;
   if (sbScroller()) sbScroller().scrollTop = prevScroll;
+  if (state.glanceOpen !== renderSidebar._glanceOpen) {
+    motion($('#sidebar .glance-expand'), [
+      { opacity: 0, transform: 'translateY(-4px)' }, { opacity: 1, transform: 'none' },
+    ]);
+  }
+  renderSidebar._glanceOpen = state.glanceOpen;
 }
 
 // open to-dos, occurrence-aware (recurring items check off per date),
 // dateless ones last, soonest first
 function openTodos() {
-  const dated = occurrences().filter((o) => o.courseId === 'todo' && o.status !== 'done');
-  const dateless = state.assignments.filter((a) => a.courseId === 'todo' && !a.dueDate && a.status !== 'done');
+  const dated = visibleOccurrences().filter((o) => o.courseId === 'todo' && o.status !== 'done');
+  const dateless = state.assignments.map(presentationAssignment).filter((a) => a.courseId === 'todo' && !a.dueDate && a.status !== 'done');
   return dated.concat(dateless).sort((x, y) => {
     const dx = x.dueDate || '9999', dy = y.dueDate || '9999';
     return dx < dy ? -1 : dx > dy ? 1 : (x.dueTime || '99') < (y.dueTime || '99') ? -1 : 1;
@@ -942,6 +1135,11 @@ function renderMain() {
   const main = $('#main');
   const sameView = renderMain._last === state.view;
   const keepScroll = sameView ? main.scrollTop : 0;
+  const pageKey = [state.view, state.view === 'courses' ? state.courseEdit : '',
+    state.view === 'import' ? !!state.review : '', state.view === 'grades' ? gradeCourseId() : '',
+    state.view === 'agenda' ? state.agendaFilter : ''].join(':');
+  const changed = renderMain._pageKey !== pageKey;
+  const layout = sameView && !changed ? captureLayout(main) : null;
   switch (state.view) {
     case 'month': main.innerHTML = monthView(); break;
     case 'week': main.innerHTML = weekView(); break;
@@ -957,25 +1155,9 @@ function renderMain() {
   // jump the page — restore the scroll offset it had
   if (sameView) main.scrollTop = keepScroll;
 
-  // animate view changes: calendar trio slides directionally, pages fade up
   const prev = renderMain._last;
-  if (prev && prev !== state.view) {
-    main.scrollTop = 0; // a stale offset from the last visit makes the slide-in judder
-    const el = main.firstElementChild;
-    if (el) {
-      let cls = 'va-fade';
-      if (VIEW_ORDER[prev] !== undefined && VIEW_ORDER[state.view] !== undefined) {
-        cls = VIEW_ORDER[state.view] > VIEW_ORDER[prev] ? 'va-left' : 'va-right';
-      }
-      el.classList.add(cls);
-      // drop the class when done so a leftover animation can't replay or
-      // keep agenda groups pinned out of content-visibility laziness
-      el.addEventListener('animationend', function h(e) {
-        if (e.target !== el) return; // ignore bubbled child animations
-        el.classList.remove(cls);
-        el.removeEventListener('animationend', h);
-      });
-    }
+  if (changed) {
+    if (!sameView || state.view === 'courses' || state.view === 'import') main.scrollTop = 0;
   }
   // week snapping would fight the free-scrolling day list; only month snaps
   main.classList.toggle('snap-weeks', state.view === 'month');
@@ -988,6 +1170,14 @@ function renderMain() {
       positionMonth(inThisMonth ? TODAY : new Date(state.year, state.month, 1), false);
     }
   }
+  if (changed) {
+    const direction = VIEW_ORDER[prev] !== undefined && VIEW_ORDER[state.view] !== undefined
+      ? Math.sign(VIEW_ORDER[state.view] - VIEW_ORDER[prev])
+      : sameView && state.view === 'courses' ? (state.courseEdit ? 1 : -1) : 0;
+    enterContent(main.firstElementChild, direction);
+    if (prev && (prev !== state.view || ['courses', 'grades', 'agenda'].includes(state.view))) hapticFeedback('selection');
+  } else if (layout) settleLayout(main, layout);
+  renderMain._pageKey = pageKey;
   renderMain._last = state.view;
 }
 
@@ -1021,7 +1211,7 @@ function monthFlowStart() {
 }
 
 function monthView() {
-  const byDate = eventsByDate(occurrences());
+  const byDate = eventsByDate(visibleOccurrences());
   const start = monthFlowStart();
   let rows = '';
   for (let w = 0; w < MONTH_PAST_WEEKS + MONTH_FUTURE_WEEKS; w++) {
@@ -1160,7 +1350,7 @@ const WEEK_PAST = 21, WEEK_FUTURE = 60;
 let weekHomed = true;
 
 function weekView() {
-  const byDate = eventsByDate(occurrences());
+  const byDate = eventsByDate(visibleOccurrences());
   const start = new Date(TODAY);
   start.setDate(TODAY.getDate() - WEEK_PAST);
   let rows = '';
@@ -1212,7 +1402,7 @@ function weekDayRowHTML(dt, byDate, showMonth) {
       ${done.map((o) => {
         const c = course(o.courseId);
         return `
-          <div class="done-chip ${o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" title="${esc(o.title)}">
+          <div class="done-chip" data-act="detail" data-id="${o.id}" title="${esc(o.title)}" style="--cc:${c.color}">
             <span class="done-chip-check" data-act="toggle-done" data-done="1" data-id="${o.id}" data-base="${o._baseId || o.id}" style="background:${c.color}">✓</span>
             <span class="done-chip-title">${esc(o.title)}</span>
           </div>`;
@@ -1297,7 +1487,7 @@ function agendaFilterHTML() {
 }
 
 function agendaView() {
-  const occ = occurrences();
+  const occ = visibleOccurrences();
   const todayStr = fmt(TODAY);
   const future = occ.filter((o) => o.dueDate >= todayStr)
     .filter((o) => state.agendaFilter === 'all' || o.type === state.agendaFilter)
@@ -1323,7 +1513,7 @@ function agendaView() {
       const c = course(o.courseId);
       const done = o.status === 'done';
       return `
-        <div class="acard ${done && o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" style="--cc:${c.color}">
+        <div class="acard" data-act="detail" data-id="${o.id}" style="--cc:${c.color}">
           <span class="check" data-act="toggle-done" data-done="${done ? 1 : 0}" data-id="${o.id}" data-base="${o._baseId || o.id}"
                 style="${done ? `background:${c.color};border-color:${c.color}` : ''}">${done ? '✓' : ''}</span>
           <span class="acard-swatch" style="background:${c.color}"></span>
@@ -1439,8 +1629,8 @@ function coursesView() {
         <div class="diff-scale-title">Appearance</div>
         <p class="side-sub">Wallpaper for both light and dark mode.</p>
         <div class="filter-row" style="margin-bottom:0;">
-          <button class="filter-pill ${state.wallpaper !== 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="colorful">Colorful</button>
-          <button class="filter-pill ${state.wallpaper === 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="subtle">Subtle</button>
+          <button class="filter-pill ${state.wallpaper !== 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="colorful">Soft</button>
+          <button class="filter-pill ${state.wallpaper === 'subtle' ? 'on' : ''}" data-act="wallpaper" data-w="subtle">Flat</button>
         </div>
       </div>
 
@@ -1460,7 +1650,7 @@ function coursesView() {
 function todoCardHTML(o) {
   const done = o.status === 'done';
   return `
-    <div class="acard ${done && o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" style="--cc:${TODO_COURSE.color}">
+    <div class="acard" data-act="detail" data-id="${o.id}" style="--cc:${TODO_COURSE.color}">
       <span class="check" data-act="toggle-done" data-done="${done ? 1 : 0}" data-id="${o.id}" data-base="${o._baseId || o.id}"
             style="${done ? `background:${TODO_COURSE.color};border-color:${TODO_COURSE.color}` : `border-color:${TODO_COURSE.color}`}">${done ? '✓' : ''}</span>
       <div class="body-col">
@@ -1478,9 +1668,9 @@ function todosView() {
   const dueToday = open.filter((o) => o.dueDate === todayStr);
   const upcoming = open.filter((o) => o.dueDate && o.dueDate > todayStr).slice(0, 25);
   const dateless = open.filter((o) => !o.dueDate);
-  const doneList = occurrences()
+  const doneList = visibleOccurrences()
     .filter((o) => o.courseId === 'todo' && o.status === 'done')
-    .concat(state.assignments.filter((a) => a.courseId === 'todo' && !a.dueDate && a.status === 'done'))
+    .concat(state.assignments.map(presentationAssignment).filter((a) => a.courseId === 'todo' && !a.dueDate && a.status === 'done'))
     .sort((x, y) => ((x.dueDate || '') < (y.dueDate || '') ? 1 : -1))
     .slice(0, 12);
 
@@ -1561,7 +1751,7 @@ const COURSE_PALETTE = ['#e5484d', '#ff9f0a', '#ffcc00', '#34c759', '#30d158', '
 
 // open items for one course, series shown once — the editor's task list
 function courseTasksHTML(c) {
-  const items = state.assignments
+  const items = state.assignments.map(presentationAssignment)
     .filter((a) => a.courseId === c.id && (a.recurrence || a.status !== 'done'))
     .sort((x, y) => {
       const dx = x.dueDate || '9999', dy = y.dueDate || '9999';
@@ -1679,6 +1869,8 @@ function buildCourseJson(cid) {
       };
       if (a.recurrence) o.recurrence = a.recurrence;
       if (a.doneDates) o.doneDates = a.doneDates;
+      if (a.exDates) o.exDates = a.exDates;
+      if (a.occurrenceOverrides) o.occurrenceOverrides = a.occurrenceOverrides;
       return o;
     }),
   }, null, 2);
@@ -1691,6 +1883,7 @@ function applyCourseJson() {
     j = JSON.parse(state.courseJson);
   } catch (e) {
     state.courseJsonError = 'Invalid JSON — ' + e.message;
+    hapticFeedback('warning');
     render();
     return;
   }
@@ -1731,12 +1924,15 @@ function applyCourseJson() {
     };
     if (a.recurrence) out.recurrence = a.recurrence;
     if (a.doneDates) out.doneDates = a.doneDates;
+    if (a.exDates) out.exDates = a.exDates;
+    if (a.occurrenceOverrides) out.occurrenceOverrides = a.occurrenceOverrides;
     return out;
   });
   state.assignments = state.assignments.filter((a) => a.courseId !== cid).concat(rebuilt);
   state.courseJsonError = '';
   state.courseJson = buildCourseJson(cid);
   state.courseJsonSaved = true;
+  hapticFeedback('success');
   render();
   setTimeout(() => {
     state.courseJsonSaved = false;
@@ -1968,7 +2164,7 @@ function reviewHTML() {
     if (it.recurrence) meta += ' · repeats ' + recurLabel(it.recurrence);
     return `
       <div class="review-item ${it.include ? '' : 'off'}">
-        <span class="check" data-act="review-toggle" data-i="${i}"
+        <span class="check" data-act="review-toggle" data-done="${it.include ? 1 : 0}" data-i="${i}"
               style="${it.include ? `background:${r.color};border-color:${r.color}` : ''}">${it.include ? '✓' : ''}</span>
         <div class="body-col">
           <div class="review-title">${esc(it.title)}</div>
@@ -2010,11 +2206,9 @@ function reviewHTML() {
 // ---------- modals ----------
 // play the pop-out animation, then apply the state change and re-render
 function animateModalClose(fn) {
-  const ov = document.querySelector('#modal-root .overlay');
-  if (!ov) { fn(); render(); return; }
-  if (ov.classList.contains('out')) return; // already closing
-  ov.classList.add('out');
-  setTimeout(() => { fn(); render(); }, 160);
+  // State changes synchronously; renderModals retains an inert outgoing panel.
+  fn();
+  render();
 }
 
 // redraw just the modal and put focus/caret back where it was — used by the
@@ -2035,19 +2229,65 @@ function refreshModal() {
 
 function renderModals() {
   const root = $('#modal-root');
+  const key = state.quickAdd ? 'quick' : state.editA ? 'edit:' + state.editA.baseId :
+    state.showAdd ? 'add' : state.detailId ? 'detail:' + state.detailId :
+    state.dayPopover ? 'day:' + state.dayPopover : '';
+  const previousKey = renderModals._key || '';
+  const same = key && key === previousKey;
+  const oldOverlay = root.firstElementChild;
+  const oldPanel = root.querySelector('.modal, .qa-panel');
+  const oldHeight = oldPanel?.getBoundingClientRect().height;
+  const oldScroll = oldPanel?.scrollTop || 0;
+  const active = root.contains(document.activeElement) ? document.activeElement : null;
+  const focusInput = active?.dataset.input;
+  const focusAct = active?.dataset.act;
+  const focusScope = active?.dataset.scope;
+  let caret = null;
+  try { caret = active?.selectionStart; } catch (e) { /* non-text field */ }
+  const oldSwitchOn = root.querySelector('.switch')?.classList.contains('on');
+  if (!key && oldOverlay && !REDUCED_MOTION) {
+    oldOverlay.inert = true;
+    oldOverlay.setAttribute('aria-hidden', 'true');
+    oldOverlay.classList.add('out', 'modal-exit');
+    document.body.appendChild(oldOverlay);
+    setTimeout(() => oldOverlay.remove(), 180);
+  }
+  root.classList.toggle('modal-stable', !!same);
+  root.classList.toggle('modal-replace', !!key && !!previousKey && !same);
   if (state.quickAdd) root.innerHTML = quickAddHTML();
   else if (state.editA) root.innerHTML = formModalHTML('edit');
   else if (state.showAdd) root.innerHTML = formModalHTML('add');
   else if (state.detailId) root.innerHTML = detailModalHTML();
   else if (state.dayPopover) root.innerHTML = dayPopoverHTML();
   else root.innerHTML = '';
+  const panel = root.querySelector('.modal, .qa-panel');
+  if (same && panel) {
+    panel.scrollTop = oldScroll;
+    const height = panel.getBoundingClientRect().height;
+    if (oldHeight && Math.abs(oldHeight - height) > 1) {
+      motion(panel, [{ height: `${oldHeight}px`, overflow: 'hidden' }, { height: `${height}px`, overflow: 'hidden' }], { duration: 220 });
+    }
+    const knob = root.querySelector('.switch-knob');
+    const switchOn = root.querySelector('.switch')?.classList.contains('on');
+    if (knob && switchOn !== oldSwitchOn) motion(knob, [
+      { transform: `translateX(${switchOn ? -17 : 17}px)` }, { transform: 'none' },
+    ], { duration: 220 });
+    const focus = [...root.querySelectorAll('[data-input], [data-act]')].find(el =>
+      focusInput ? el.dataset.input === focusInput : focusAct && el.dataset.act === focusAct &&
+        (!focusScope || el.dataset.scope === focusScope));
+    if (focus) {
+      focus.focus({ preventScroll: true });
+      try { if (caret != null) focus.setSelectionRange(caret, caret); } catch (e) { /* non-text field */ }
+    }
+  }
+  renderModals._key = key;
 }
 
 // ---- day popover: every item on one day, from the month grid's "+N more" ----
 function dayPopoverHTML() {
   const ds = state.dayPopover;
   const dt = parseDate(ds);
-  const evs = occurrences().filter((o) => o.dueDate === ds)
+  const evs = visibleOccurrences().filter((o) => o.dueDate === ds)
     .sort((a, b) => {
       const ta = a.dueTime || '23:59', tb = b.dueTime || '23:59';
       return ta < tb ? -1 : ta > tb ? 1 : b.difficulty - a.difficulty;
@@ -2057,7 +2297,7 @@ function dayPopoverHTML() {
     const c = course(o.courseId);
     const done = o.status === 'done';
     return `
-      <div class="acard ${done && o.id === completedPopId ? 'pill-pop' : ''}" data-act="detail" data-id="${o.id}" style="--cc:${c.color}">
+      <div class="acard" data-act="detail" data-id="${o.id}" style="--cc:${c.color}">
         <span class="check" data-act="toggle-done" data-done="${done ? 1 : 0}" data-id="${o.id}" data-base="${o._baseId || o.id}"
               style="${done ? `background:${c.color};border-color:${c.color}` : ''}">${done ? '✓' : ''}</span>
         <span class="acard-swatch" style="background:${c.color}"></span>
@@ -2239,12 +2479,14 @@ function quickAddSubmit() {
     source: 'manual',
     notes: '',
   }]);
-  hapticTick('edge');
+  hapticFeedback('success');
   animateModalClose(() => { state.quickAdd = null; });
 }
 
 function formModalHTML(mode) {
   const n = mode === 'edit' ? state.editA : state.newA;
+  const scopedRecurringEdit = mode === 'edit' && !!n.occurrenceDate;
+  const editsSeries = !scopedRecurringEdit || n.scope !== 'single';
   const courseOpts = [{ id: 'todo', name: '📌 To-Do (personal)' }].concat(state.courses).map((c) =>
     `<option value="${c.id}" ${c.id === n.courseId ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
   const typeOpts = TYPES.map((t) =>
@@ -2265,6 +2507,16 @@ function formModalHTML(mode) {
     <div class="overlay" data-act="${mode === 'edit' ? 'close-edit' : 'close-add'}">
       <div class="modal">
         <div class="modal-title">${mode === 'edit' ? 'Edit Assignment' : 'New Assignment'}</div>
+
+        ${scopedRecurringEdit ? `
+        <div class="edit-scope" role="group" aria-label="Apply changes to">
+          <div class="edit-scope-label">Apply changes to</div>
+          <div class="edit-scope-options">
+            <button class="edit-scope-btn ${n.scope === 'single' ? 'on' : ''}" data-act="edit-scope" data-scope="single">This event</button>
+            <button class="edit-scope-btn ${n.scope === 'future' ? 'on' : ''}" data-act="edit-scope" data-scope="future">This &amp; future</button>
+            <button class="edit-scope-btn ${n.scope === 'series' ? 'on' : ''}" data-act="edit-scope" data-scope="series">All events</button>
+          </div>
+        </div>` : ''}
 
         <label class="field-label">Title</label>
         <input class="field mb14" value="${esc(n.title)}" data-input="new-title" placeholder="e.g. Problem Set 3">
@@ -2299,7 +2551,9 @@ function formModalHTML(mode) {
         <label class="field-label" style="margin-bottom:7px;">Difficulty</label>
         <div class="diff-picker">${diffBtns}</div>
 
-        <div class="repeat-row" data-act="add-repeats" style="margin-bottom:${n.repeats ? '14px' : '16px'}">
+        ${scopedRecurringEdit && !editsSeries ? `
+        <div class="single-edit-note">Only this occurrence will change. The rest of the repeating assignment stays the same.</div>
+        ` : `<div class="repeat-row" data-act="add-repeats" style="margin-bottom:${n.repeats ? '14px' : '16px'}">
           <span class="repeat-label">Repeats</span>
           <span class="switch ${n.repeats ? 'on' : ''}"><span class="switch-knob"></span></span>
         </div>
@@ -2324,7 +2578,7 @@ function formModalHTML(mode) {
         <div class="byday-row mb16">
           ${DAY_ABBR.map((l, d) => `
             <button class="byday-btn ${(n.byDay || []).includes(d) ? 'on' : ''}" data-act="add-byday" data-d="${d}">${l[0]}</button>`).join('')}
-        </div>` : ''}` : ''}
+        </div>` : ''}` : ''}`}
 
         <label class="field-label">Notes</label>
         <textarea class="field mb16" rows="3" data-input="new-notes" placeholder="Optional — chapters, format, links…">${esc(n.notes || '')}</textarea>
@@ -2356,7 +2610,7 @@ function detailModalHTML() {
   return `
     <div class="overlay" data-act="close-detail">
       <div class="modal detail">
-        <button class="btn-edit" data-act="detail-edit" data-base="${found._baseId || found.id}">Edit</button>
+        <button class="btn-edit" data-act="detail-edit" data-base="${found._baseId || found.id}" ${found._recurring ? `data-date="${found._occurrenceDate || found.dueDate}"` : ''}>Edit</button>
         <div class="detail-course">
           <span class="detail-swatch" style="background:${c.color}"></span>
           <span class="detail-coursename">${esc(c.name)} · <span class="cap">${esc(found.type)}</span></span>
@@ -2373,13 +2627,13 @@ function detailModalHTML() {
         ${found.notes ? `<div class="detail-notes">${esc(found.notes)}</div>` : ''}
 
         <div class="detail-actions">
-          <button class="btn-done ${done ? 'undone' : ''}" data-act="detail-toggle-done" data-id="${found.id}" data-base="${found._baseId || found.id}">${done ? 'Mark as To-Do' : 'Mark Done'}</button>
+          <button class="btn-done ${done ? 'undone' : ''}" data-act="detail-toggle-done" data-done="${done ? 1 : 0}" data-id="${found.id}" data-base="${found._baseId || found.id}">${done ? 'Mark as To-Do' : 'Mark Done'}</button>
           <button class="btn-ics" data-act="detail-export" title="Export to Apple Calendar">.ics</button>
           ${found._recurring ? '' : `<button class="btn-delete" data-act="detail-delete" data-base="${found._baseId || found.id}">Delete</button>`}
         </div>
         ${found._recurring ? `
         <div class="detail-actions detail-del-row">
-          <button class="btn-delete" data-act="detail-delete-occ" data-base="${found._baseId}" data-date="${found.dueDate}" title="Remove only this date">Delete this date</button>
+          <button class="btn-delete" data-act="detail-delete-occ" data-base="${found._baseId}" data-date="${found._occurrenceDate || found.dueDate}" title="Remove only this date">Delete this date</button>
           <button class="btn-delete" data-act="detail-delete" data-base="${found._baseId}" title="Remove every occurrence">Delete series</button>
         </div>` : ''}
       </div>
@@ -2472,6 +2726,7 @@ function confirmReview() {
   }
   state.assignments = state.assignments.concat(adds);
   state.review = null;
+  hapticFeedback('success');
   state.view = 'month';
   render();
 }
@@ -2486,7 +2741,10 @@ async function saveTextAs(text, filename, filterName, ext, mime) {
         defaultPath: filename,
         filters: [{ name: filterName, extensions: [ext] }],
       });
-      if (path) await t.fs.writeTextFile(path, text);
+      if (path) {
+        await t.fs.writeTextFile(path, text);
+        hapticFeedback('success');
+      }
     } catch (e) {
       console.error('save failed', e);
     }
@@ -2560,6 +2818,88 @@ function restoreBackup(j) {
   state.courseEdit = null;
   render();
   showUndo('Backup restored', () => Object.assign(state, prev));
+}
+
+function recurrenceFromDraft(n) {
+  if (!n.repeats) return null;
+  const rec = { frequency: n.freq, interval: 1, until: n.until };
+  if (n.freq === 'weekly' && n.byDay && n.byDay.length) rec.byDay = n.byDay.slice();
+  return rec;
+}
+
+// Apply the calendar-style scope chosen in the recurring edit form.
+function applyAssignmentEdit(n) {
+  const base = state.assignments.find((a) => a.id === n.baseId);
+  if (!base) return;
+  const values = assignmentValues(n);
+
+  if (n.occurrenceDate && n.scope === 'single') {
+    const overrides = Object.assign({}, base.occurrenceOverrides || {});
+    const patch = occurrencePatch(base, n, n.occurrenceDate);
+    if (Object.keys(patch).length) overrides[n.occurrenceDate] = patch;
+    else delete overrides[n.occurrenceDate];
+    state.assignments = state.assignments.map((a) => {
+      if (a.id !== base.id) return a;
+      const updated = Object.assign({}, a, { occurrenceOverrides: overrides });
+      if (!Object.keys(overrides).length) delete updated.occurrenceOverrides;
+      return updated;
+    });
+    return;
+  }
+
+  if (n.occurrenceDate && n.scope === 'future') {
+    const splitDate = n.occurrenceDate;
+    const before = Object.assign({}, base, {
+      recurrence: Object.assign({}, base.recurrence, { until: previousDate(splitDate) }),
+      doneDates: datesBefore(base.doneDates, splitDate),
+      exDates: datesBefore(base.exDates, splitDate),
+      occurrenceOverrides: datesBefore(base.occurrenceOverrides, splitDate),
+    });
+    for (const field of ['doneDates', 'exDates', 'occurrenceOverrides']) {
+      if (!Object.keys(before[field]).length) delete before[field];
+    }
+
+    const futureOverrides = datesFrom(base.occurrenceOverrides, splitDate);
+    // The selected occurrence supplied the new series defaults, so its old
+    // patch is now redundant. Later customized occurrences remain customized.
+    delete futureOverrides[splitDate];
+    const after = Object.assign({}, base, values, {
+      id: 'm' + Date.now(),
+      status: 'todo',
+      doneDates: datesFrom(base.doneDates, splitDate),
+      exDates: datesFrom(base.exDates, splitDate),
+      occurrenceOverrides: futureOverrides,
+    });
+    const rec = recurrenceFromDraft(n);
+    if (rec) after.recurrence = rec; else delete after.recurrence;
+    for (const field of ['doneDates', 'exDates', 'occurrenceOverrides']) {
+      if (!Object.keys(after[field]).length) delete after[field];
+    }
+    if (!rec) {
+      const completed = base.doneDates && base.doneDates[splitDate];
+      after.status = completed ? 'done' : 'todo';
+      if (typeof completed === 'string') after.doneAt = completed; else delete after.doneAt;
+      delete after.doneDates;
+      delete after.exDates;
+      delete after.occurrenceOverrides;
+    }
+
+    const hasEarlierOccurrences = occurrences(true).some((o) =>
+      o._baseId === base.id && o._occurrenceDate < splitDate);
+    state.assignments = state.assignments.flatMap((a) => {
+      if (a.id !== base.id) return [a];
+      return hasEarlierOccurrences ? [before, after] : [after];
+    });
+    return;
+  }
+
+  state.assignments = state.assignments.map((a) => {
+    if (a.id !== base.id) return a;
+    const updated = Object.assign({}, a, values);
+    const rec = recurrenceFromDraft(n);
+    if (rec) updated.recurrence = rec; else delete updated.recurrence;
+    return updated;
+  });
 }
 
 // ---------- syllabus prompt ----------
@@ -2637,6 +2977,7 @@ async function copyPrompt() {
     document.execCommand('copy');
     ta.remove();
   }
+  hapticFeedback('success');
   state.copied = true;
   render();
   setTimeout(() => { state.copied = false; if (state.view === 'import') render(); }, 1600);
@@ -2667,12 +3008,15 @@ function showUndo(msg, restore) {
   if (old) old.remove();
   clearTimeout(toastTimer);
   const el = document.createElement('div');
+  hapticFeedback('warning');
   el.id = 'toast';
+  el.setAttribute('role', 'status');
   el.className = 'toast';
   el.innerHTML = `<span class="toast-msg">${esc(msg)}</span><button class="toast-undo">Undo</button>`;
   el.querySelector('.toast-undo').addEventListener('click', () => {
     dismissToast();
     restore();
+    hapticFeedback('success');
     render();
   });
   document.body.appendChild(el);
@@ -2692,7 +3036,16 @@ function refreshGradeTotals(cid) {
   const summary = $('#grade-summary');
   if (summary) summary.innerHTML = gradeSummaryHTML(cid);
   const targets = $('#grade-targets-wrap');
-  if (targets) targets.innerHTML = gradeTargetsHTML(cid);
+  if (targets) {
+    const widths = [...targets.querySelectorAll('.gt-bar')].map(el => el.getBoundingClientRect().width);
+    targets.innerHTML = gradeTargetsHTML(cid);
+    [...targets.querySelectorAll('.gt-bar')].forEach((el, i) => {
+      const width = el.getBoundingClientRect().width;
+      if (!width) return;
+      motion(el, [{ transform: `scaleX(${(widths[i] ?? width) / width})`, transformOrigin: 'left' },
+        { transform: 'none', transformOrigin: 'left' }], { duration: 220 });
+    });
+  }
 }
 
 function updateCat(cid, id, field, val) {
@@ -2705,6 +3058,11 @@ document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act;
+  if (el.matches(':disabled') || el.closest('[inert]')) return;
+  if (['theme', 'wallpaper', 'legend-toggle', 'glance-open', 'grade-list', 'grade-add',
+    'course-color', 'review-toggle', 'add-diff', 'add-repeats', 'add-byday', 'add-date-quick', 'edit-scope'].includes(act)) {
+    hapticFeedback('selection');
+  }
 
   switch (act) {
     case 'view': {
@@ -2762,8 +3120,10 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'toggle-done': {
+      if (completingIds.has(el.dataset.id)) break;
       if (el.dataset.done === '1') {
-        toggleDone(el.dataset.id, el.dataset.base); // unchecking is instant
+        toggleDone(el.dataset.id, el.dataset.base);
+        hapticFeedback('selection');
       } else {
         playCompleteAnim(el);
       }
@@ -2786,6 +3146,7 @@ document.addEventListener('click', (e) => {
     case 'agenda-filter': {
       state.agendaFilter = el.dataset.type;
       renderMain();
+      decorateA11y();
       break;
     }
     case 'legend-toggle': {
@@ -2812,6 +3173,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'grade-remove': {
+      hapticFeedback('warning');
       const cid = gradeCourseId();
       state.grades = Object.assign({}, state.grades, {
         [cid]: (state.grades[cid] || []).filter((c) => c.id !== el.dataset.id),
@@ -2853,6 +3215,7 @@ document.addEventListener('click', (e) => {
     case 'course-delete': {
       if (!state.confirmDeleteCourse) {
         state.confirmDeleteCourse = true;
+        hapticFeedback('warning');
         render();
         break;
       }
@@ -2894,6 +3257,7 @@ document.addEventListener('click', (e) => {
     case 'new-semester': {
       if (!state.confirmNewTerm) {
         state.confirmNewTerm = true;
+        hapticFeedback('warning');
         render();
         break;
       }
@@ -2924,7 +3288,15 @@ document.addEventListener('click', (e) => {
     case 'review-toggle': {
       const it = state.review.items[Number(el.dataset.i)];
       it.include = !it.include;
-      render();
+      el.closest('.review-item').classList.toggle('off', !it.include);
+      el.dataset.done = it.include ? '1' : '0';
+      el.setAttribute('aria-checked', String(it.include));
+      el.setAttribute('aria-label', it.include ? 'Exclude from import' : 'Include in import');
+      el.style.background = it.include ? state.review.color : '';
+      el.style.borderColor = it.include ? state.review.color : '';
+      el.textContent = it.include ? '✓' : '';
+      $('.review-summary').textContent = `${state.review.items.filter(item => item.include).length} of ${state.review.items.length} selected`;
+      motion(el, [{ transform: 'scale(.88)' }, { transform: 'none' }], { duration: 180 });
       break;
     }
     case 'review-cancel': {
@@ -2947,6 +3319,7 @@ document.addEventListener('click', (e) => {
       const n = state.newA;
       if (!n.title.trim()) {
         state.formError = 'Give it a title first.';
+        hapticFeedback('warning');
         refreshModal();
         const t = document.querySelector('[data-input="new-title"]');
         if (t) t.focus();
@@ -2971,8 +3344,8 @@ document.addEventListener('click', (e) => {
         if (n.freq === 'weekly' && n.byDay && n.byDay.length) a.recurrence.byDay = n.byDay.slice();
       }
       state.assignments = state.assignments.concat([a]);
-      state.showAdd = false;
-      render();
+      hapticFeedback('success');
+      animateModalClose(() => { state.showAdd = false; });
       break;
     }
     // form controls redraw only the modal, keeping whatever field has focus —
@@ -3002,6 +3375,21 @@ document.addEventListener('click', (e) => {
       refreshModal();
       break;
     }
+    case 'edit-scope': {
+      const n = state.editA;
+      if (!n || !n.occurrenceDate) break;
+      const nextScope = el.dataset.scope;
+      const currentDefaults = n.scopeDefaults[n.scope];
+      const nextDefaults = n.scopeDefaults[nextScope];
+      // Swap inherited values for the new scope, but carry anything the user
+      // has already changed with them to the scope they intentionally choose.
+      for (const field of OCCURRENCE_FIELDS) {
+        if (n[field] === currentDefaults[field]) n[field] = nextDefaults[field];
+      }
+      n.scope = nextScope;
+      refreshModal();
+      break;
+    }
     case 'close-detail': {
       if (e.target !== el) break;
       animateModalClose(() => { state.detailId = null; });
@@ -3013,26 +3401,46 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'detail-toggle-done': {
-      toggleDone(el.dataset.id, el.dataset.base);
+      if (completingIds.has(el.dataset.id)) break;
+      if (el.dataset.done === '1') {
+        toggleDone(el.dataset.id, el.dataset.base);
+        hapticFeedback('selection');
+      } else playCompleteAnim(el);
       break;
     }
     case 'detail-edit': {
       const a = state.assignments.find((x) => x.id === el.dataset.base);
       if (!a) break;
+      const occurrenceDate = el.dataset.date || '';
+      const shown = occurrenceDate
+        ? occurrences(true).find((o) => o._baseId === a.id && o._occurrenceDate === occurrenceDate) || a
+        : a;
+      const draftValues = (item, dueDate) => ({
+        title: item.title,
+        courseId: item.courseId,
+        type: item.type,
+        dueDate: dueDate || '',
+        dueTime: item.dueTime || '',
+        difficulty: item.difficulty,
+        notes: item.notes || '',
+      });
+      const occurrenceDefaults = draftValues(shown, shown.dueDate || occurrenceDate);
+      const seriesDefaults = draftValues(a, a.dueDate);
       state.formError = '';
       state.editA = {
         baseId: a.id,
-        title: a.title,
-        courseId: a.courseId,
-        type: a.type,
-        dueDate: a.dueDate || '',
-        dueTime: a.dueTime || '',
-        difficulty: a.difficulty,
+        occurrenceDate,
+        scope: occurrenceDate ? 'single' : 'series',
+        scopeDefaults: {
+          single: occurrenceDefaults,
+          future: occurrenceDefaults,
+          series: seriesDefaults,
+        },
+        ...occurrenceDefaults,
         repeats: !!a.recurrence,
         freq: (a.recurrence && a.recurrence.frequency) || 'weekly',
         byDay: a.recurrence ? [...normalizeByDay(a.recurrence.byDay)].sort() : [],
         until: (a.recurrence && a.recurrence.until) || termEnd(),
-        notes: a.notes || '',
       };
       state.detailId = null;
       render();
@@ -3052,32 +3460,23 @@ document.addEventListener('click', (e) => {
       if (!n) break;
       if (!n.title.trim()) {
         state.formError = 'Give it a title first.';
+        hapticFeedback('warning');
         refreshModal();
         const t = document.querySelector('[data-input="new-title"]');
         if (t) t.focus();
         break;
       }
+      if (n.scope !== 'single' && n.repeats && n.dueDate && n.until && n.until < n.dueDate) {
+        state.formError = 'The repeat end date must be on or after the due date.';
+        hapticFeedback('warning');
+        refreshModal();
+        break;
+      }
       state.formError = '';
-      state.assignments = state.assignments.map((a) => {
-        if (a.id !== n.baseId) return a;
-        const upd = Object.assign({}, a, {
-          title: n.title.trim(),
-          courseId: n.courseId,
-          type: n.type,
-          dueDate: n.dueDate || null,
-          dueTime: n.dueDate ? (n.dueTime || '23:59') : n.dueTime || undefined,
-          difficulty: n.difficulty,
-          notes: n.notes || '',
-        });
-        if (n.repeats) {
-          upd.recurrence = { frequency: n.freq, interval: 1, until: n.until };
-          if (n.freq === 'weekly' && n.byDay && n.byDay.length) upd.recurrence.byDay = n.byDay.slice();
-        } else delete upd.recurrence;
-        return upd;
-      });
-      state.editA = null;
+      applyAssignmentEdit(n);
       refreshCourseJson();
-      render();
+      hapticFeedback('success');
+      animateModalClose(() => { state.editA = null; });
       break;
     }
     case 'detail-delete': {
@@ -3227,6 +3626,7 @@ document.addEventListener('change', (e) => {
       const id = el.dataset.id;
       state.assignments = state.assignments.map((a) =>
         a.id === id ? Object.assign({}, a, { dueDate: v }) : a);
+      hapticFeedback('success');
       render();
       break;
     }
@@ -3304,9 +3704,9 @@ document.addEventListener('keydown', (e) => {
     requestAnimationFrame(() => { const i = $('#qa-input'); if (i) i.focus(); });
     return;
   }
-  if (cmd && ['1', '2', '3'].includes(e.key)) {
+  if (cmd && ['1', '2', '3', '4'].includes(e.key)) {
     e.preventDefault();
-    state.view = ['month', 'week', 'agenda'][Number(e.key) - 1];
+    state.view = ['month', 'week', 'agenda', 'done'][Number(e.key) - 1];
     render();
     return;
   }
@@ -3468,17 +3868,19 @@ function moveOccurrence(occId, newDate) {
     if (oldDate === newDate) return;
     const src = state.assignments.find((a) => a.id === base);
     if (!src) return;
+    const shown = occurrences(true).find((o) =>
+      o._baseId === base && o._occurrenceDate === oldDate) || src;
     const single = {
       id: 'm' + Date.now(),
-      title: src.title,
-      courseId: src.courseId,
-      type: src.type,
+      title: shown.title,
+      courseId: shown.courseId,
+      type: shown.type,
       dueDate: newDate,
-      dueTime: src.dueTime,
-      difficulty: src.difficulty,
+      dueTime: shown.dueTime,
+      difficulty: shown.difficulty,
       status: src.doneDates && src.doneDates[oldDate] ? 'done' : 'todo',
       source: src.source,
-      notes: src.notes || '',
+      notes: shown.notes || '',
     };
     state.assignments = state.assignments
       .map((a) => a.id === base
@@ -3557,6 +3959,7 @@ function refreshToday() {
   render();
 }
 window.addEventListener('focus', refreshToday);
+window.addEventListener('resize', renderTitlebar);
 setInterval(refreshToday, 60 * 1000);
 
 // ---------- boot ----------
